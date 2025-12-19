@@ -13,6 +13,8 @@ const sessionHelper = require('../utils/sessionHelper')
 const { updateRateLimitCounters } = require('../utils/rateLimitHelper')
 const claudeRelayConfigService = require('../services/claudeRelayConfigService')
 const { sanitizeUpstreamError } = require('../utils/errorSanitizer')
+const userConfigService = require('../services/userConfigService')
+const geminiDirectRelayService = require('../services/geminiDirectRelayService')
 const router = express.Router()
 
 function queueRateLimitUpdate(rateLimitInfo, usageSummary, model, context = '') {
@@ -122,6 +124,45 @@ async function handleMessagesRequest(req, res) {
           message: '此 API Key 无权访问 Claude 服务'
         }
       })
+    }
+
+    // 🔀 Gemini Direct Routing Check
+    // Checks if the user has enabled direct routing to Gemini for Claude requests
+    // Priority: User Config > Global Config
+    let routeToGemini = false
+    const { userId } = req.apiKey
+
+    try {
+      if (userId) {
+        // 1. Check User Config
+        const isGeminiDirectEnabled = await userConfigService.getGeminiDirectEnabled(userId)
+        if (isGeminiDirectEnabled) {
+          routeToGemini = true
+          logger.info(
+            `🔀 Routing request to Gemini Direct for user ${userId} (Key: ${req.apiKey.name})`
+          )
+        }
+      }
+
+      // 2. Check Global Config if not enabled by user
+      if (!routeToGemini) {
+        const globalConfig = await claudeRelayConfigService.getConfig()
+        if (globalConfig.geminiDirectGlobalEnabled) {
+          routeToGemini = true
+          logger.info(
+            `🔀 Routing request to Gemini Direct (Global Config) (Key: ${req.apiKey.name})`
+          )
+        }
+      }
+
+      if (routeToGemini) {
+        // Attach user info to req for service usage
+        req.user = { id: req.apiKey.id, userId }
+        return await geminiDirectRelayService.handleRequest(req, res)
+      }
+    } catch (geminiError) {
+      logger.error('❌ Error checking/routing to Gemini Direct:', geminiError)
+      // Fallback to normal flow if error occurs
     }
 
     // 🔄 并发满额重试标志：最多重试一次（使用req对象存储状态）
@@ -1348,6 +1389,42 @@ router.post('/v1/messages/count_tokens', authenticateApiKey, async (req, res) =>
   }
 
   logger.info(`🔢 Processing token count request for key: ${req.apiKey.name}`)
+
+  // 🔀 Gemini Direct Routing Check for count_tokens
+  let routeToGemini = false
+  const { userId } = req.apiKey
+
+  try {
+    if (userId) {
+      // 1. Check User Config
+      const isGeminiDirectEnabled = await userConfigService.getGeminiDirectEnabled(userId)
+      if (isGeminiDirectEnabled) {
+        routeToGemini = true
+        logger.info(
+          `🔀 [count_tokens] Routing to Gemini Direct for user ${userId} (Key: ${req.apiKey.name}) - Returning mock count`
+        )
+      }
+    }
+
+    // 2. Check Global Config if not enabled by user
+    if (!routeToGemini) {
+      const globalConfig = await claudeRelayConfigService.getConfig()
+      if (globalConfig.geminiDirectGlobalEnabled) {
+        routeToGemini = true
+        logger.info(
+          `🔀 [count_tokens] Routing to Gemini Direct (Global Config) (Key: ${req.apiKey.name}) - Returning mock count`
+        )
+      }
+    }
+
+    if (routeToGemini) {
+      // 附加用户信息以便 service 层使用
+      req.user = { id: req.apiKey.id, userId }
+      return await geminiDirectRelayService.countTokens(req, res)
+    }
+  } catch (geminiError) {
+    logger.error('❌ Error checking Gemini Direct for count_tokens:', geminiError)
+  }
 
   const sessionHash = sessionHelper.generateSessionHash(req.body)
   const requestedModel = req.body.model

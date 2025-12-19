@@ -156,9 +156,26 @@ function isAccountDisabledError(statusCode, body) {
   )
 }
 
+/**
+ * 创建标准 API 错误对象
+ * @param {string} message - 错误消息
+ * @param {number} statusCode - HTTP 状态码
+ * @param {string} code - 错误代码
+ * @param {string} type - 错误类型
+ * @returns {Error} - 带有自定义属性的 Error 对象
+ */
+function createApiError(message, statusCode = 500, code = 'internal_error', type = 'api_error') {
+  const error = new Error(message)
+  error.statusCode = statusCode
+  error.code = code
+  error.type = type
+  return error
+}
+
 module.exports = {
   sanitizeErrorMessage,
   sanitizeUpstreamError,
   extractErrorMessage,
-  isAccountDisabledError
+  isAccountDisabledError,
+  createApiError
 }

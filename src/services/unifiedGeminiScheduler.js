@@ -254,7 +254,7 @@ class UnifiedGeminiScheduler {
           this._isActive(boundAccount.isActive) &&
           boundAccount.status !== 'error'
         ) {
-          const isRateLimited = await this.isAccountRateLimited(boundAccount.id)
+          const isRateLimited = await this.isAccountRateLimited(boundAccount.id, 'gemini')
           if (!isRateLimited) {
             // 检查模型支持
             if (
@@ -330,7 +330,7 @@ class UnifiedGeminiScheduler {
         }
 
         // 检查是否被限流
-        const isRateLimited = await this.isAccountRateLimited(account.id)
+        const isRateLimited = await this.isAccountRateLimited(account.id, 'gemini')
         if (!isRateLimited) {
           availableAccounts.push({
             ...account,
@@ -368,7 +368,7 @@ class UnifiedGeminiScheduler {
           }
 
           // 检查是否被限流
-          const isRateLimited = await this.isAccountRateLimited(account.id)
+          const isRateLimited = await this.isAccountRateLimited(account.id, 'gemini-api')
           if (!isRateLimited) {
             availableAccounts.push({
               ...account,

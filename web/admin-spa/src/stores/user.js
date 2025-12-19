@@ -171,6 +171,50 @@ export const useUserStore = defineStore('user', {
       }
     },
 
+    // 🔧 获取用户高级配置
+    async getUserConfig() {
+      try {
+        const response = await axios.get(`${API_BASE}/config`)
+        return response.data.config
+      } catch (error) {
+        console.error('Failed to get user config:', error)
+        throw error
+      }
+    },
+
+    // 🔧 更新模型映射
+    async updateModelMapping(mapping) {
+      try {
+        await axios.post(`${API_BASE}/config/model-mapping`, { mapping })
+        return true
+      } catch (error) {
+        console.error('Failed to update model mapping:', error)
+        throw error
+      }
+    },
+
+    // 🔧 更新System Prompt
+    async updateSystemPrompt(prompt, position) {
+      try {
+        await axios.post(`${API_BASE}/config/system-prompt`, { prompt, position })
+        return true
+      } catch (error) {
+        console.error('Failed to update system prompt:', error)
+        throw error
+      }
+    },
+
+    // 🔧 更新Gemini直连开关
+    async updateGeminiDirectEnabled(enabled) {
+      try {
+        await axios.post(`${API_BASE}/config/gemini-direct`, { enabled })
+        return true
+      } catch (error) {
+        console.error('Failed to update Gemini direct status:', error)
+        throw error
+      }
+    },
+
     // 🧹 清除认证信息
     clearAuth() {
       this.user = null

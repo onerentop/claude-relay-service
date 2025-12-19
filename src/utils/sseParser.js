@@ -47,6 +47,62 @@ function parseSSELine(line) {
   }
 }
 
+const logger = require('./logger')
+
+/**
+ * Robust Server-Sent Events (SSE) Parser Generator
+ * Handles data split across chunks and multiple events per chunk
+ *
+ * @param {ReadableStream|Array} stream - Input stream or iterable
+ * @yields {Object} Parsed JSON data
+ */
+async function* parseSSE(stream) {
+  let buffer = ''
+
+  for await (const chunk of stream) {
+    buffer += chunk.toString()
+
+    // Split by double newline which separates events
+    const parts = buffer.split('\n\n')
+
+    // The last part might be incomplete, keep it in buffer
+    buffer = parts.pop()
+
+    for (const part of parts) {
+      const lines = part.split('\n')
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = line.slice(6).trim()
+          if (data && data !== '[DONE]') {
+            try {
+              yield JSON.parse(data)
+            } catch (e) {
+              logger.debug('[SSE] Failed to parse JSON data:', e.message)
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Process any remaining buffer if it looks like a complete event
+  if (buffer.trim()) {
+    const lines = buffer.split('\n')
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        const data = line.slice(6).trim()
+        if (data && data !== '[DONE]') {
+          try {
+            yield JSON.parse(data)
+          } catch (e) {}
+        }
+      }
+    }
+  }
+}
+
 module.exports = {
-  parseSSELine
+  parseSSELine,
+  parseSSE
 }

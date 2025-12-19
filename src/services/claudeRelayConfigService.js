@@ -29,6 +29,10 @@ const DEFAULT_CONFIG = {
   // 排队健康检查配置
   concurrentRequestQueueHealthCheckEnabled: true, // 是否启用排队健康检查（默认开启）
   concurrentRequestQueueHealthThreshold: 0.8, // 健康检查阈值（P90 >= 超时 × 阈值时拒绝新请求）
+  // Gemini Direct 全局配置
+  geminiDirectGlobalEnabled: false,
+  geminiDirectGlobalMapping: {}, // { "claude-3-5-sonnet-20241022": "gemini-2.0-flash-exp" }
+  geminiDirectGlobalSystemPrompt: { prompt: '', position: 'append' },
   updatedAt: null,
   updatedBy: null
 }

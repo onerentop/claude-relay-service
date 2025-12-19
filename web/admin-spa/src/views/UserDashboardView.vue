@@ -67,6 +67,17 @@
                 >
                   Tutorial
                 </button>
+                <button
+                  :class="[
+                    'rounded-md px-3 py-2 text-sm font-medium',
+                    activeTab === 'settings'
+                      ? 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'
+                      : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300'
+                  ]"
+                  @click="handleTabChange('settings')"
+                >
+                  Settings
+                </button>
               </div>
             </div>
           </div>
@@ -331,6 +342,11 @@
       <div v-else-if="activeTab === 'tutorial'" class="space-y-6">
         <TutorialView />
       </div>
+
+      <!-- Settings Tab -->
+      <div v-else-if="activeTab === 'settings'">
+        <UserConfigSettings />
+      </div>
     </main>
   </div>
 </template>
@@ -344,6 +360,7 @@ import { showToast } from '@/utils/toast'
 import ThemeToggle from '@/components/common/ThemeToggle.vue'
 import UserApiKeysManager from '@/components/user/UserApiKeysManager.vue'
 import UserUsageStats from '@/components/user/UserUsageStats.vue'
+import UserConfigSettings from '@/components/user/UserConfigSettings.vue'
 import TutorialView from '@/views/TutorialView.vue'
 
 const router = useRouter()

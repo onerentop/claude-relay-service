@@ -3,6 +3,7 @@ const router = express.Router()
 const ldapService = require('../services/ldapService')
 const userService = require('../services/userService')
 const apiKeyService = require('../services/apiKeyService')
+const userConfigService = require('../services/userConfigService')
 const logger = require('../utils/logger')
 const config = require('../../config/config')
 const inputValidator = require('../utils/inputValidator')
@@ -758,6 +759,74 @@ router.get('/admin/ldap-test', authenticateUserOrAdmin, requireAdmin, async (req
       error: 'LDAP test error',
       message: 'Failed to test LDAP connection'
     })
+  }
+})
+
+// === 用户配置端点 ===
+
+// 获取用户配置
+router.get('/config', authenticateUser, async (req, res) => {
+  try {
+    const userId = req.user.id
+    const [modelMapping, systemPrompt, geminiDirectEnabled] = await Promise.all([
+      userConfigService.getModelMapping(userId),
+      userConfigService.getSystemPrompt(userId),
+      userConfigService.getGeminiDirectEnabled(userId)
+    ])
+
+    res.json({
+      success: true,
+      config: {
+        modelMapping,
+        systemPrompt,
+        geminiDirectEnabled
+      }
+    })
+  } catch (error) {
+    logger.error('❌ Get user config error:', error)
+    res.status(500).json({ error: 'Failed to get user config' })
+  }
+})
+
+// 更新模型映射
+router.post('/config/model-mapping', authenticateUser, async (req, res) => {
+  try {
+    const { mapping } = req.body
+    if (!mapping || typeof mapping !== 'object') {
+      return res.status(400).json({ error: 'Invalid mapping' })
+    }
+    await userConfigService.setModelMapping(req.user.id, mapping)
+    res.json({ success: true, message: 'Model mapping updated' })
+  } catch (error) {
+    logger.error('❌ Update model mapping error:', error)
+    res.status(500).json({ error: 'Failed to update model mapping' })
+  }
+})
+
+// 更新 System Prompt
+router.post('/config/system-prompt', authenticateUser, async (req, res) => {
+  try {
+    const { prompt, position } = req.body
+    await userConfigService.setSystemPrompt(req.user.id, prompt, position)
+    res.json({ success: true, message: 'System prompt updated' })
+  } catch (error) {
+    logger.error('❌ Update system prompt error:', error)
+    res.status(500).json({ error: 'Failed to update system prompt' })
+  }
+})
+
+// 更新 Gemini 直连开关
+router.post('/config/gemini-direct', authenticateUser, async (req, res) => {
+  try {
+    const { enabled } = req.body
+    if (typeof enabled !== 'boolean') {
+      return res.status(400).json({ error: 'Invalid enabled value' })
+    }
+    await userConfigService.setGeminiDirectEnabled(req.user.id, enabled)
+    res.json({ success: true, message: `Gemini Direct ${enabled ? 'enabled' : 'disabled'}` })
+  } catch (error) {
+    logger.error('❌ Update Gemini Direct status error:', error)
+    res.status(500).json({ error: 'Failed to update Gemini Direct status' })
   }
 })
 

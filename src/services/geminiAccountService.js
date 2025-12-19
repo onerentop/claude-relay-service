@@ -88,9 +88,23 @@ function decrypt(text) {
 
   try {
     const key = generateEncryptionKey()
+
+    // 检查格式是否正确 (IV:Encrypted)
+    if (!text.includes(':') || text.length < 33) {
+      // 兼容明文存储：如果看起来像普通 Token (无冒号或长度不够)，直接返回
+      // 不再打印警告，避免刷屏
+      return text
+    }
+
     // IV 是固定长度的 32 个十六进制字符（16 字节）
     const ivHex = text.substring(0, 32)
     const encryptedHex = text.substring(33) // 跳过冒号
+
+    // 检查 IV 长度是否合法
+    if (ivHex.length !== 32) {
+      logger.warn('Decryption warning: Invalid IV length')
+      return ''
+    }
 
     const iv = Buffer.from(ivHex, 'hex')
     const encryptedText = Buffer.from(encryptedHex, 'hex')
@@ -109,7 +123,7 @@ function decrypt(text) {
 
     return result
   } catch (error) {
-    logger.error('Decryption error:', error)
+    logger.error(`Decryption error: ${error.message} | ${JSON.stringify(error)}`)
     return ''
   }
 }
@@ -304,7 +318,65 @@ async function refreshAccessToken(refreshToken, proxyConfig = null) {
     }
 
     // 调用 refreshAccessToken 获取新的 tokens
-    const response = await oAuth2Client.refreshAccessToken()
+    let response
+    try {
+      response = await oAuth2Client.refreshAccessToken()
+    } catch (refreshError) {
+      // 🚨 如果标准库刷新失败（特别是超时），尝试使用 Axios 直接请求作为回退
+      // 这可以解决 google-auth-library 在某些环境下不尊重代理设置的问题
+      if (
+        (refreshError.code === 'ETIMEDOUT' ||
+          refreshError.message.includes('ETIMEDOUT') ||
+          refreshError.code === 'ECONNRESET' ||
+          refreshError.message.includes('timeout')) &&
+        proxyConfig
+      ) {
+        logger.warn(
+          `⚠️ Standard token refresh timed out, attempting Axios fallback with proxy for account...`
+        )
+        const axios = require('axios')
+        const proxyAgent = ProxyHelper.createProxyAgent(proxyConfig)
+
+        const tokenUrl = 'https://oauth2.googleapis.com/token'
+        const data = {
+          client_id: OAUTH_CLIENT_ID,
+          client_secret: OAUTH_CLIENT_SECRET,
+          refresh_token: refreshToken,
+          grant_type: 'refresh_token'
+        }
+
+        const axiosConfig = {
+          method: 'POST',
+          url: tokenUrl,
+          data,
+          timeout: 30000,
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        }
+
+        if (proxyAgent) {
+          axiosConfig.httpsAgent = proxyAgent
+          axiosConfig.proxy = false
+        }
+
+        const axiosResponse = await axios(axiosConfig)
+        // 构造兼容 google-auth-library 的响应格式
+        response = {
+          credentials: {
+            access_token: axiosResponse.data.access_token,
+            refresh_token: axiosResponse.data.refresh_token, // 可能为空
+            scope: axiosResponse.data.scope,
+            token_type: axiosResponse.data.token_type,
+            expiry_date: Date.now() + axiosResponse.data.expires_in * 1000
+          }
+        }
+        logger.info('✅ Token refresh successful using Axios fallback')
+      } else {
+        throw refreshError
+      }
+    }
+
     const { credentials } = response
 
     // 检查是否成功获取了新的 access_token
@@ -476,7 +548,10 @@ async function getAccount(accountId) {
     try {
       accountData.proxy = JSON.parse(accountData.proxy)
     } catch (e) {
-      // 如果解析失败，保持原样或设置为null
+      // 如果解析失败，记录错误
+      logger.error(`❌ Failed to parse proxy config for account ${accountId}: ${e.message}`, {
+        proxyRaw: accountData.proxy
+      })
       accountData.proxy = null
     }
   }
@@ -914,7 +989,17 @@ async function refreshAccountToken(accountId) {
 
     // 记录开始刷新
     logRefreshStart(accountId, account.name, 'gemini', 'manual_refresh')
-    logger.info(`🔄 Starting token refresh for Gemini account: ${account.name} (${accountId})`)
+
+    // Check if proxy is available
+    if (account.proxy) {
+      logger.info(
+        `🔄 Starting token refresh for Gemini account: ${account.name} (${accountId}) with Proxy: ${ProxyHelper.maskProxyInfo(account.proxy)}`
+      )
+    } else {
+      logger.info(
+        `🔄 Starting token refresh for Gemini account: ${account.name} (${accountId}) (No Proxy)`
+      )
+    }
 
     // account.refreshToken 已经是解密后的值（从 getAccount 返回）
     // 传入账户的代理配置
@@ -1402,22 +1487,50 @@ async function setupUser(
 }
 
 // 调用 Code Assist API 计算 token 数量（支持代理）
-async function countTokens(client, contents, model = 'gemini-2.0-flash-exp', proxyConfig = null) {
+// bodyOrContents: 可以是 contents 数组（旧用法）或完整的 request body 对象
+async function countTokens(
+  client,
+  bodyOrContents,
+  model = 'gemini-2.0-flash-exp',
+  proxyConfig = null
+) {
   const axios = require('axios')
   const CODE_ASSIST_ENDPOINT = 'https://cloudcode-pa.googleapis.com'
   const CODE_ASSIST_API_VERSION = 'v1internal'
 
   const { token } = await client.getAccessToken()
 
-  // 按照 gemini-cli 的转换格式构造请求
-  const request = {
-    request: {
+  // 构造请求体
+  let requestPayload = {}
+
+  if (Array.isArray(bodyOrContents)) {
+    // 旧用法：只传递了 contents 数组
+    requestPayload = {
       model: `models/${model}`,
-      contents
+      contents: bodyOrContents
     }
+  } else if (typeof bodyOrContents === 'object') {
+    // 新用法：传递了完整的 body (contents, tools, etc)
+    // 确保 model 字段存在
+    requestPayload = {
+      ...bodyOrContents,
+      model: `models/${model}`
+    }
+    // 如果 body 中已经包含了 model，优先使用参数传进来的 model (通常是处理过的)
+    // 但 Gemini API 结构通常是 { request: { model, contents... } } 或者直接 POST ...:countTokens body
+    // PA API countTokens 文档：POST ...:countTokens
+    // Body: { model: string, contents: ..., tools: ... }
+    // 注意：gemini-cli 的实现是包裹在 { request: { ... } } 中吗？
+    // 看下面的代码，它包裹在 { request: ... } 中。这是为了适配 google-auth-library 还是 PA API 的特殊性？
+    // 之前的代码：const request = { request: { model..., contents... } }
+    // 让我们保持这个包裹结构
   }
 
-  logger.info('📊 countTokens API调用开始', { model, contentsLength: contents.length })
+  const request = {
+    request: requestPayload
+  }
+
+  logger.info('📊 countTokens API调用开始', { model, isFullBody: !Array.isArray(bodyOrContents) })
 
   const axiosConfig = {
     url: `${CODE_ASSIST_ENDPOINT}/${CODE_ASSIST_API_VERSION}:countTokens`,
@@ -1465,8 +1578,11 @@ async function generateContent(
   const { token } = await client.getAccessToken()
 
   // 按照 gemini-cli 的转换格式构造请求
+  // 不要强制添加 models/ 前缀，信任传入的模型名称
+  const { model } = requestData
+
   const request = {
-    model: requestData.model,
+    model,
     request: {
       ...requestData.request,
       session_id: sessionId
@@ -1483,6 +1599,15 @@ async function generateContent(
     request.project = projectId
   }
 
+  // 🔍 DEBUG: 打印工具配置以排查 500 错误
+  if (requestData.request?.tools || requestData.request?.toolConfig) {
+    logger.info('🔧 Gemini Tools Config:', {
+      toolCount: requestData.request?.tools?.length || 0,
+      tools: JSON.stringify(requestData.request?.tools, null, 2),
+      toolConfig: JSON.stringify(requestData.request?.toolConfig, null, 2)
+    })
+  }
+
   logger.info('🤖 generateContent API调用开始', {
     model: requestData.model,
     userPromptId,
@@ -1490,12 +1615,14 @@ async function generateContent(
     sessionId
   })
 
-  // 添加详细的请求日志
+  // DEBUG: 临时启用详细日志
   logger.info('📦 generateContent 请求详情', {
     url: `${CODE_ASSIST_ENDPOINT}/${CODE_ASSIST_API_VERSION}:generateContent`,
+    authorization: `Bearer ${token}`,
     requestBody: JSON.stringify(request, null, 2)
   })
 
+  // 非流式请求使用标准的 generateContent 端点
   const axiosConfig = {
     url: `${CODE_ASSIST_ENDPOINT}/${CODE_ASSIST_API_VERSION}:generateContent`,
     method: 'POST',
@@ -1504,8 +1631,17 @@ async function generateContent(
       'Content-Type': 'application/json'
     },
     data: request,
+    responseType: 'json',  // 接收JSON响应
     timeout: 600000 // 生成内容可能需要更长时间
   }
+
+  // DEBUG: 打印完整的HTTP请求参数
+  logger.info('📤 完整的HTTP请求参数 (generateContent):', {
+    method: axiosConfig.method,
+    url: axiosConfig.url,
+    headers: axiosConfig.headers,
+    requestBody: JSON.stringify(axiosConfig.data, null, 2)
+  })
 
   // 添加代理配置
   const proxyAgent = ProxyHelper.createProxyAgent(proxyConfig)
@@ -1525,6 +1661,8 @@ async function generateContent(
   const response = await axios(axiosConfig)
 
   logger.info('✅ generateContent API调用成功')
+
+  // 直接返回JSON响应数据
   return response.data
 }
 
@@ -1545,8 +1683,11 @@ async function generateContentStream(
   const { token } = await client.getAccessToken()
 
   // 按照 gemini-cli 的转换格式构造请求
+  // 不要强制添加 models/ 前缀，信任传入的模型名称
+  const { model } = requestData
+
   const request = {
-    model: requestData.model,
+    model,
     request: {
       ...requestData.request,
       session_id: sessionId
@@ -1563,11 +1704,27 @@ async function generateContentStream(
     request.project = projectId
   }
 
+  // 🔍 DEBUG: 打印工具配置以排查 500 错误
+  if (requestData.request?.tools || requestData.request?.toolConfig) {
+    logger.info('🔧 Gemini Tools Config (Stream):', {
+      toolCount: requestData.request?.tools?.length || 0,
+      tools: JSON.stringify(requestData.request?.tools, null, 2),
+      toolConfig: JSON.stringify(requestData.request?.toolConfig, null, 2)
+    })
+  }
+
   logger.info('🌊 streamGenerateContent API调用开始', {
     model: requestData.model,
     userPromptId,
     projectId,
     sessionId
+  })
+
+  // DEBUG: Log the full request being sent to PA API
+  logger.info('🌊 streamGenerateContent 请求详情', {
+    url: `${CODE_ASSIST_ENDPOINT}/${CODE_ASSIST_API_VERSION}:streamGenerateContent?alt=sse`,
+    authorization: `Bearer ${token}`,
+    requestBody: JSON.stringify(request, null, 2).substring(0, 3000)
   })
 
   const axiosConfig = {
@@ -1584,6 +1741,15 @@ async function generateContentStream(
     responseType: 'stream',
     timeout: 0 // 流式请求不设置超时限制，由 keepAlive 和 AbortSignal 控制
   }
+
+  // DEBUG: 打印完整的HTTP请求参数
+  logger.info('📤 完整的HTTP请求参数 (streamGenerateContent):', {
+    method: axiosConfig.method,
+    url: axiosConfig.url,
+    params: axiosConfig.params,
+    headers: axiosConfig.headers,
+    requestBody: JSON.stringify(axiosConfig.data, null, 2).substring(0, 3000)
+  })
 
   // 添加代理配置
   const proxyAgent = ProxyHelper.createProxyAgent(proxyConfig)
@@ -1608,7 +1774,25 @@ async function generateContentStream(
 
   const response = await axios(axiosConfig)
 
+  // DEBUG: Log detailed response information
   logger.info('✅ streamGenerateContent API调用成功，开始流式传输')
+  logger.info(`[GeminiPA] Response status: ${response.status}`)
+  logger.info(`[GeminiPA] Response headers: ${JSON.stringify(response.headers)}`)
+  logger.info(`[GeminiPA] Response data type: ${typeof response.data}`)
+  logger.info(`[GeminiPA] Response data constructor: ${response.data?.constructor?.name}`)
+  logger.info(`[GeminiPA] Response data readable: ${response.data?.readable}`)
+  logger.info(`[GeminiPA] Response data readableEnded: ${response.data?.readableEnded}`)
+
+  // DEBUG: Log first chunk immediately to see if stream has data
+  if (response.data && response.data.readable) {
+    response.data.once('data', (chunk) => {
+      logger.info(`[GeminiPA] First chunk received! Length: ${chunk.length}, content: ${chunk.toString().substring(0, 200)}`)
+    })
+    response.data.once('end', () => {
+      logger.info('[GeminiPA] Stream ended event fired')
+    })
+  }
+
   return response.data // 返回流对象
 }
 

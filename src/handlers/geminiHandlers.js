@@ -2509,6 +2509,30 @@ async function handleStandardStreamGenerateContent(req, res) {
   } catch (error) {
     const normalizedError = await normalizeAxiosStreamError(error)
 
+    // 如果遇到 429 或 503，标记账户限流，以便调度器下次能够故障转移
+    if (normalizedError.status === 429 || normalizedError.status === 503) {
+      try {
+        const unifiedGeminiScheduler = require('../services/unifiedGeminiScheduler')
+        // sessionHash 已经在 try 块外部定义
+        const currentAccountType = isApiAccount ? 'gemini-api' : 'gemini'
+
+        // 只有当 accountId 已被赋值时才标记
+        if (accountId) {
+          await unifiedGeminiScheduler.markAccountRateLimited(
+            accountId,
+            currentAccountType,
+            sessionHash
+          )
+
+          logger.warn(
+            `🚫 Marked account ${accountId} (${currentAccountType}) as rate limited due to ${normalizedError.status} (Sticky session cleared)`
+          )
+        }
+      } catch (limitError) {
+        logger.error('Failed to mark account as rate limited:', limitError)
+      }
+    }
+
     logger.error(`Error in standard streamGenerateContent endpoint`, {
       message: error.message,
       status: error.response?.status,

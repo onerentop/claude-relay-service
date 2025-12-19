@@ -804,6 +804,177 @@
               </div>
             </div>
 
+            <!-- Gemini Direct 全局配置 -->
+            <div
+              class="mb-6 rounded-lg bg-white/80 p-6 shadow-lg backdrop-blur-sm dark:bg-gray-800/80"
+            >
+              <div class="flex items-center justify-between">
+                <div>
+                  <div class="flex items-center">
+                    <div
+                      class="mr-3 flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 text-white shadow-lg"
+                    >
+                      <i class="fas fa-bolt"></i>
+                    </div>
+                    <div>
+                      <h2 class="text-lg font-semibold text-gray-800 dark:text-gray-200">
+                        Gemini Direct 全局配置
+                      </h2>
+                      <p class="mt-1 text-sm text-gray-600 dark:text-gray-400">
+                        为未配置个人设置的用户启用 Gemini API 直连模式（降低延迟）
+                      </p>
+                    </div>
+                  </div>
+                </div>
+                <label class="relative inline-flex cursor-pointer items-center">
+                  <input
+                    v-model="claudeConfig.geminiDirectGlobalEnabled"
+                    class="peer sr-only"
+                    type="checkbox"
+                    @change="saveClaudeConfig"
+                  />
+                  <div
+                    class="peer h-6 w-11 rounded-full bg-gray-200 after:absolute after:left-[2px] after:top-[2px] after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:border-gray-600 dark:bg-gray-700 dark:peer-focus:ring-blue-800"
+                  ></div>
+                </label>
+              </div>
+
+              <!-- 全局配置详情（仅在启用时显示） -->
+              <div v-if="claudeConfig.geminiDirectGlobalEnabled" class="mt-6 space-y-6">
+                <!-- System Prompt -->
+                <div>
+                  <h3 class="mb-4 text-base font-medium text-gray-900 dark:text-white">
+                    全局 System Prompt
+                  </h3>
+                  <div class="space-y-4">
+                    <div>
+                      <label class="block text-sm font-medium text-gray-700 dark:text-gray-300"
+                        >Prompt Content</label
+                      >
+                      <input
+                        v-model="systemPrompt.prompt"
+                        class="mt-1 block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 dark:border-gray-500 dark:bg-gray-700 dark:text-white sm:text-sm"
+                        placeholder="请输入自定义系统提示词..."
+                        @change="saveClaudeConfig"
+                      />
+                    </div>
+                    <div>
+                      <label class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300"
+                        >位置</label
+                      >
+                      <div class="flex items-center space-x-4">
+                        <label class="inline-flex items-center">
+                          <input
+                            v-model="systemPrompt.position"
+                            class="form-radio text-blue-600"
+                            type="radio"
+                            value="prepend"
+                            @change="saveClaudeConfig"
+                          />
+                          <span class="ml-2 text-gray-700 dark:text-gray-300"
+                            >前置 (在原提示词之前)</span
+                          >
+                        </label>
+                        <label class="inline-flex items-center">
+                          <input
+                            v-model="systemPrompt.position"
+                            class="form-radio text-blue-600"
+                            type="radio"
+                            value="append"
+                            @change="saveClaudeConfig"
+                          />
+                          <span class="ml-2 text-gray-700 dark:text-gray-300"
+                            >后置 (在原提示词之后)</span
+                          >
+                        </label>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Model Mapping -->
+                <div>
+                  <div class="mb-4 flex items-center justify-between">
+                    <h3 class="text-base font-medium text-gray-900 dark:text-white">
+                      全局模型映射
+                    </h3>
+                    <button
+                      class="inline-flex items-center rounded border border-transparent bg-blue-100 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-200 dark:bg-blue-900 dark:text-blue-300"
+                      @click="addMapping"
+                    >
+                      添加映射
+                    </button>
+                  </div>
+
+                  <div class="space-y-2">
+                    <div
+                      v-for="(target, source) in modelMapping"
+                      :key="source"
+                      class="flex items-center space-x-2"
+                    >
+                      <input
+                        class="flex-1 rounded-lg border border-gray-300 bg-gray-100 px-3 py-2 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-400 sm:text-sm"
+                        disabled
+                        :value="source"
+                      />
+                      <span class="text-gray-500">→</span>
+                      <input
+                        v-model="modelMapping[source]"
+                        class="flex-1 rounded-lg border border-gray-300 px-3 py-2 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 dark:border-gray-500 dark:bg-gray-700 dark:text-white sm:text-sm"
+                        @change="saveClaudeConfig"
+                      />
+                      <button
+                        class="text-red-600 hover:text-red-800"
+                        @click="
+                          () => {
+                            removeMapping(source)
+                            saveClaudeConfig()
+                          }
+                        "
+                      >
+                        <i class="fas fa-trash-alt"></i>
+                      </button>
+                    </div>
+
+                    <!-- New Mapping Input -->
+                    <div
+                      v-if="showAddMapping"
+                      class="flex items-center space-x-2 rounded bg-gray-50 p-2 dark:bg-gray-700/50"
+                    >
+                      <input
+                        v-model="newMapping.source"
+                        class="flex-1 rounded-lg border border-gray-300 px-3 py-2 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 dark:border-gray-500 dark:bg-gray-700 dark:text-white sm:text-sm"
+                        placeholder="Claude Model (e.g. claude-3-5-sonnet-20241022)"
+                      />
+                      <span class="text-gray-500">→</span>
+                      <input
+                        v-model="newMapping.target"
+                        class="flex-1 rounded-lg border border-gray-300 px-3 py-2 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 dark:border-gray-500 dark:bg-gray-700 dark:text-white sm:text-sm"
+                        placeholder="Gemini Model (e.g. gemini-2.0-flash)"
+                      />
+                      <button
+                        class="text-green-600 hover:text-green-800"
+                        @click="
+                          () => {
+                            confirmAddMapping()
+                            saveClaudeConfig()
+                          }
+                        "
+                      >
+                        <i class="fas fa-check"></i>
+                      </button>
+                      <button
+                        class="text-gray-500 hover:text-gray-700"
+                        @click="showAddMapping = false"
+                      >
+                        <i class="fas fa-times"></i>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <!-- 用户消息串行队列 -->
             <div
               class="mb-6 rounded-lg bg-white/80 p-6 shadow-lg backdrop-blur-sm dark:bg-gray-800/80"
@@ -1684,9 +1855,51 @@ const claudeConfig = ref({
   concurrentRequestQueueMaxSize: 3,
   concurrentRequestQueueMaxSizeMultiplier: 0,
   concurrentRequestQueueTimeoutMs: 10000,
+  geminiDirectGlobalEnabled: false,
+  geminiDirectGlobalMapping: {},
+  geminiDirectGlobalSystemPrompt: { prompt: '', position: 'append' },
   updatedAt: null,
   updatedBy: null
 })
+
+// Gemini Direct 映射状态
+const modelMapping = ref({})
+const showAddMapping = ref(false)
+const newMapping = ref({ source: '', target: '' })
+const systemPrompt = ref({ prompt: '', position: 'append' })
+
+// 映射管理函数
+const addMapping = () => {
+  newMapping.value = { source: '', target: '' }
+  showAddMapping.value = true
+}
+
+const confirmAddMapping = () => {
+  if (newMapping.value.source && newMapping.value.target) {
+    modelMapping.value[newMapping.value.source] = newMapping.value.target
+    showAddMapping.value = false
+    newMapping.value = { source: '', target: '' }
+  }
+}
+
+const removeMapping = (source) => {
+  delete modelMapping.value[source]
+}
+
+// 监听 claudeConfig 变化并同步到本地状态
+watch(
+  () => claudeConfig.value,
+  (newVal) => {
+    if (newVal) {
+      modelMapping.value = newVal.geminiDirectGlobalMapping || {}
+      systemPrompt.value = newVal.geminiDirectGlobalSystemPrompt || {
+        prompt: '',
+        position: 'append'
+      }
+    }
+  },
+  { deep: true }
+)
 
 // 平台表单相关
 const showAddPlatformModal = ref(false)
@@ -1953,14 +2166,20 @@ const loadClaudeConfig = async () => {
         sessionBindingErrorMessage:
           response.config?.sessionBindingErrorMessage || '你的本地session已污染，请清理后使用。',
         sessionBindingTtlDays: response.config?.sessionBindingTtlDays ?? 30,
-        userMessageQueueEnabled: response.config?.userMessageQueueEnabled ?? false, // 与后端默认值保持一致
+        userMessageQueueEnabled: response.config?.userMessageQueueEnabled ?? false,
         userMessageQueueDelayMs: response.config?.userMessageQueueDelayMs ?? 200,
-        userMessageQueueTimeoutMs: response.config?.userMessageQueueTimeoutMs ?? 5000, // 与后端默认值保持一致
+        userMessageQueueTimeoutMs: response.config?.userMessageQueueTimeoutMs ?? 5000,
         concurrentRequestQueueEnabled: response.config?.concurrentRequestQueueEnabled ?? false,
         concurrentRequestQueueMaxSize: response.config?.concurrentRequestQueueMaxSize ?? 3,
         concurrentRequestQueueMaxSizeMultiplier:
           response.config?.concurrentRequestQueueMaxSizeMultiplier ?? 0,
         concurrentRequestQueueTimeoutMs: response.config?.concurrentRequestQueueTimeoutMs ?? 10000,
+        geminiDirectGlobalEnabled: response.config?.geminiDirectGlobalEnabled ?? false,
+        geminiDirectGlobalMapping: response.config?.geminiDirectGlobalMapping || {},
+        geminiDirectGlobalSystemPrompt: response.config?.geminiDirectGlobalSystemPrompt || {
+          prompt: '',
+          position: 'append'
+        },
         updatedAt: response.config?.updatedAt || null,
         updatedBy: response.config?.updatedBy || null
       }
@@ -1993,18 +2212,19 @@ const saveClaudeConfig = async () => {
       concurrentRequestQueueMaxSize: claudeConfig.value.concurrentRequestQueueMaxSize,
       concurrentRequestQueueMaxSizeMultiplier:
         claudeConfig.value.concurrentRequestQueueMaxSizeMultiplier,
-      concurrentRequestQueueTimeoutMs: claudeConfig.value.concurrentRequestQueueTimeoutMs
+      concurrentRequestQueueTimeoutMs: claudeConfig.value.concurrentRequestQueueTimeoutMs,
+      geminiDirectGlobalEnabled: claudeConfig.value.geminiDirectGlobalEnabled,
+      geminiDirectGlobalMapping: modelMapping.value,
+      geminiDirectGlobalSystemPrompt: systemPrompt.value
     }
 
     const response = await apiClient.put('/admin/claude-relay-config', payload, {
       signal: abortController.value.signal
     })
     if (response.success && isMounted.value) {
-      claudeConfig.value = {
-        ...claudeConfig.value,
-        updatedAt: response.config?.updatedAt || new Date().toISOString(),
-        updatedBy: response.config?.updatedBy || null
-      }
+      // 成功后仅更新元数据，不覆盖本地编辑中的状态
+      claudeConfig.value.updatedAt = response.config?.updatedAt
+      claudeConfig.value.updatedBy = response.config?.updatedBy
       showToast('Claude 转发配置已保存', 'success')
     }
   } catch (error) {

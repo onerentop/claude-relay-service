@@ -47,7 +47,10 @@ router.put('/claude-relay-config', authenticateAdmin, async (req, res) => {
       concurrentRequestQueueEnabled,
       concurrentRequestQueueMaxSize,
       concurrentRequestQueueMaxSizeMultiplier,
-      concurrentRequestQueueTimeoutMs
+      concurrentRequestQueueTimeoutMs,
+      geminiDirectGlobalEnabled,
+      geminiDirectGlobalMapping,
+      geminiDirectGlobalSystemPrompt
     } = req.body
 
     // 验证输入
@@ -162,6 +165,39 @@ router.put('/claude-relay-config', authenticateAdmin, async (req, res) => {
       }
     }
 
+    // 验证 Gemini Direct 全局配置
+    if (geminiDirectGlobalEnabled !== undefined && typeof geminiDirectGlobalEnabled !== 'boolean') {
+      return res.status(400).json({ error: 'geminiDirectGlobalEnabled must be a boolean' })
+    }
+
+    if (geminiDirectGlobalMapping !== undefined) {
+      if (typeof geminiDirectGlobalMapping !== 'object' || geminiDirectGlobalMapping === null) {
+        return res.status(400).json({ error: 'geminiDirectGlobalMapping must be an object' })
+      }
+    }
+
+    if (geminiDirectGlobalSystemPrompt !== undefined) {
+      if (
+        typeof geminiDirectGlobalSystemPrompt !== 'object' ||
+        geminiDirectGlobalSystemPrompt === null
+      ) {
+        return res.status(400).json({ error: 'geminiDirectGlobalSystemPrompt must be an object' })
+      }
+      if (typeof geminiDirectGlobalSystemPrompt.prompt !== 'string') {
+        return res
+          .status(400)
+          .json({ error: 'geminiDirectGlobalSystemPrompt.prompt must be a string' })
+      }
+      if (
+        geminiDirectGlobalSystemPrompt.position &&
+        !['prepend', 'append'].includes(geminiDirectGlobalSystemPrompt.position)
+      ) {
+        return res
+          .status(400)
+          .json({ error: "geminiDirectGlobalSystemPrompt.position must be 'prepend' or 'append'" })
+      }
+    }
+
     const updateData = {}
     if (claudeCodeOnlyEnabled !== undefined) {
       updateData.claudeCodeOnlyEnabled = claudeCodeOnlyEnabled
@@ -195,6 +231,15 @@ router.put('/claude-relay-config', authenticateAdmin, async (req, res) => {
     }
     if (concurrentRequestQueueTimeoutMs !== undefined) {
       updateData.concurrentRequestQueueTimeoutMs = concurrentRequestQueueTimeoutMs
+    }
+    if (geminiDirectGlobalEnabled !== undefined) {
+      updateData.geminiDirectGlobalEnabled = geminiDirectGlobalEnabled
+    }
+    if (geminiDirectGlobalMapping !== undefined) {
+      updateData.geminiDirectGlobalMapping = geminiDirectGlobalMapping
+    }
+    if (geminiDirectGlobalSystemPrompt !== undefined) {
+      updateData.geminiDirectGlobalSystemPrompt = geminiDirectGlobalSystemPrompt
     }
 
     const updatedConfig = await claudeRelayConfigService.updateConfig(

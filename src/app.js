@@ -261,6 +261,7 @@ class Application {
       }
 
       // 🛣️ 路由
+      this.app.use('/', apiRoutes) // 挂载到根路径，适配 Claude Code 客户端直接访问 /v1/...
       this.app.use('/api', apiRoutes)
       this.app.use('/api', unifiedRoutes) // 统一智能路由（支持 /v1/chat/completions 等）
       this.app.use('/claude', apiRoutes) // /claude 路由别名，与 /api 功能相同
