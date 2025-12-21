@@ -1631,7 +1631,7 @@ async function generateContent(
       'Content-Type': 'application/json'
     },
     data: request,
-    responseType: 'json',  // 接收JSON响应
+    responseType: 'json', // 接收JSON响应
     timeout: 600000 // 生成内容可能需要更长时间
   }
 
@@ -1783,15 +1783,8 @@ async function generateContentStream(
   logger.info(`[GeminiPA] Response data readable: ${response.data?.readable}`)
   logger.info(`[GeminiPA] Response data readableEnded: ${response.data?.readableEnded}`)
 
-  // DEBUG: Log first chunk immediately to see if stream has data
-  if (response.data && response.data.readable) {
-    response.data.once('data', (chunk) => {
-      logger.info(`[GeminiPA] First chunk received! Length: ${chunk.length}, content: ${chunk.toString().substring(0, 200)}`)
-    })
-    response.data.once('end', () => {
-      logger.info('[GeminiPA] Stream ended event fired')
-    })
-  }
+  // 注意：不要在这里添加 once('data') 监听器！
+  // 那会消费流的第一个 chunk，导致 _geminiChunkGenerator 收不到完整数据
 
   return response.data // 返回流对象
 }

@@ -95,7 +95,9 @@ async function* parseSSE(stream) {
         if (data && data !== '[DONE]') {
           try {
             yield JSON.parse(data)
-          } catch (e) {}
+          } catch (_e) {
+            // JSON parse error - skip malformed data
+          }
         }
       }
     }

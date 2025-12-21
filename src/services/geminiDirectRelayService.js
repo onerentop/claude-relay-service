@@ -33,167 +33,71 @@ class GeminiDirectRelayService {
   }
 
   async countTokens(req, res) {
-    const { model } = req.body
+    const { model, messages, system } = req.body
 
-    // 1. 获取配置（用户配置优先 > 全局配置）
-    const apiKeyId = req.user.id
-    const { userId } = req.user
-    let userMapping = {}
-    let systemPromptConfig = null
-    let globalConfig = null
+    // 🚀 优化：直接返回本地估算值，不调用 Gemini API
+    // 原因：
+    // 1. count_tokens 只是预估，不需要精确值
+    // 2. Claude Code CLI 启动时会发送大量并发 count_tokens 请求
+    // 3. 调用真正的 API 会触发限流 (429)，导致后续所有请求失败
+    //
+    // 估算规则（参考 Claude 官方）：
+    // - 英文: ~4 字符/token
+    // - 中文: ~1.5 字符/token
+    // - 代码: ~3 字符/token
+    // 采用保守估计：平均 3 字符/token
 
-    if (userId) {
-      userMapping = await userConfigService.getModelMapping(userId)
-      systemPromptConfig = await userConfigService.getSystemPrompt(userId)
-    }
+    let totalChars = 0
 
-    const claudeRelayConfigService = require('./claudeRelayConfigService')
-    try {
-      globalConfig = await claudeRelayConfigService.getConfig()
-    } catch (e) {
-      logger.warn('[GeminiDirect] Failed to load global config:', e)
-    }
-
-    // 如果模型名已经是 Gemini 格式（以 gemini- 开头），直接使用，不要映射
-    let targetModel
-    if (model.startsWith('gemini-')) {
-      targetModel = model
-    } else {
-      // Claude模型需要映射
-      targetModel = userMapping[model]
-      if (!targetModel && globalConfig?.geminiDirectGlobalMapping) {
-        targetModel = globalConfig.geminiDirectGlobalMapping[model]
-      }
-      if (!targetModel) {
-        targetModel = this.modelMapping[model] || config.claudeToGeminiConversion?.defaultGeminiModel
-      }
-    }
-
-    if (!systemPromptConfig && globalConfig?.geminiDirectGlobalSystemPrompt?.prompt) {
-      systemPromptConfig = globalConfig.geminiDirectGlobalSystemPrompt
-    }
-
-    logger.info(`[GeminiDirect] Counting tokens for model ${model} -> ${targetModel}`)
-
-    // 2. 选择账号 (借用 Unified Scheduler)
-    const sessionHash = sessionHelper.generateSessionHash(req.body)
-    let accountSelection
-    try {
-      accountSelection = await unifiedGeminiScheduler.selectAccountForApiKey(
-        req.apiKey,
-        sessionHash,
-        targetModel,
-        { allowApiAccounts: true }
-      )
-    } catch (error) {
-      logger.error('[GeminiDirect] Account selection failed for countTokens:', error)
-      // 如果没有可用账户，返回 0 而不是报错，保证流程继续
-      return res.json({ input_tokens: 0 })
-    }
-
-    const { accountId, accountType } = accountSelection
-    let account
-    let authHeader
-    let endpointBase
-
-    if (accountType === 'gemini-api') {
-      account = await geminiApiAccountService.getAccount(accountId)
-      authHeader = {}
-      endpointBase = account.baseUrl || GEMINI_PUBLIC_API_BASE
-    } else {
-      account = await geminiAccountService.getAccount(accountId)
-      // OAuth Token 刷新逻辑
-      if (geminiAccountService.isTokenExpired(account)) {
-        await geminiAccountService.refreshAccountToken(accountId)
-        account = await geminiAccountService.getAccount(accountId)
-      }
-      authHeader = { Authorization: `Bearer ${account.accessToken}` }
-      endpointBase = GEMINI_PA_API_BASE
-    }
-
-    // 3. 转换请求体 (New Direct Pipeline)
-    const geminiBody = claudeToGemini.convertRequest(req.body, systemPromptConfig, targetModel)
-
-    // 4. 发送 countTokens 请求
-    try {
-      let url
-      let requestData
-
-      let modelName = targetModel
-      if (
-        !modelName.startsWith('models/') &&
-        !modelName.startsWith('publishers/') &&
-        !modelName.startsWith('projects/')
-      ) {
-        modelName = `models/${modelName}`
-      }
-
-      if (accountType === 'gemini-api') {
-        // API Key Account: POST .../models/{model}:countTokens?key=API_KEY
-        url = `${endpointBase}/${modelName}:countTokens?key=${account.apiKey}`
-        requestData = this._sanitizeForApiKey(geminiBody)
-
-        const axiosConfig = {
-          method: 'POST',
-          url,
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          data: requestData,
-          timeout: 10000 // 短超时
-        }
-
-        // 代理配置
-        if (account.proxy) {
-          const proxyAgent = ProxyHelper.createProxyAgent(account.proxy)
-          if (proxyAgent) {
-            axiosConfig.httpsAgent = proxyAgent
-            axiosConfig.proxy = false
+    // 计算 system prompt 长度
+    if (system) {
+      if (typeof system === 'string') {
+        totalChars += system.length
+      } else if (Array.isArray(system)) {
+        for (const block of system) {
+          if (block.type === 'text' && block.text) {
+            totalChars += block.text.length
           }
-        } else {
-          axiosConfig.httpsAgent = keepAliveAgent
         }
-
-        const response = await axios(axiosConfig)
-        const totalTokens = response.data.totalTokens || 0
-
-        logger.info(`[GeminiDirect] Counted tokens: ${totalTokens}`)
-        return res.json({ input_tokens: totalTokens })
-      } else {
-        // OAuth Account: Delegate to geminiAccountService
-        const client = await geminiAccountService.getOauthClient(
-          account.accessToken,
-          account.refreshToken,
-          account.proxy
-        )
-
-        if (!client) {
-          throw new Error('Failed to create OAuth client for countTokens')
-        }
-
-        // geminiAccountService.countTokens adds 'models/' prefix automatically
-        // So we must ensure the model name does NOT have it here
-        let serviceModel = targetModel
-        if (serviceModel.startsWith('models/')) {
-          serviceModel = serviceModel.replace('models/', '')
-        }
-
-        const response = await geminiAccountService.countTokens(
-          client,
-          geminiBody, // Pass full body (contents, tools, systemInstruction, etc.)
-          serviceModel,
-          account.proxy
-        )
-
-        const totalTokens = response.totalTokens || 0
-        logger.info(`[GeminiDirect] Counted tokens (via service): ${totalTokens}`)
-        return res.json({ input_tokens: totalTokens })
       }
-    } catch (error) {
-      logger.warn('[GeminiDirect] countTokens failed, returning 0:', error.message)
-      // Fallback to 0 on error
-      return res.json({ input_tokens: 0 })
     }
+
+    // 计算 messages 长度
+    if (messages && Array.isArray(messages)) {
+      for (const msg of messages) {
+        if (typeof msg.content === 'string') {
+          totalChars += msg.content.length
+        } else if (Array.isArray(msg.content)) {
+          for (const block of msg.content) {
+            if (block.type === 'text' && block.text) {
+              totalChars += block.text.length
+            } else if (block.type === 'tool_use') {
+              // 工具调用也计算
+              totalChars += JSON.stringify(block.input || {}).length + (block.name?.length || 0)
+            } else if (block.type === 'tool_result') {
+              if (typeof block.content === 'string') {
+                totalChars += block.content.length
+              } else if (Array.isArray(block.content)) {
+                for (const r of block.content) {
+                  if (r.type === 'text' && r.text) {
+                    totalChars += r.text.length
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // 估算 token 数量（保守估计：3 字符/token）
+    const estimatedTokens = Math.ceil(totalChars / 3)
+
+    logger.debug(
+      `[GeminiDirect] countTokens (local estimate): model=${model}, chars=${totalChars}, tokens=${estimatedTokens}`
+    )
+
+    return res.json({ input_tokens: estimatedTokens })
   }
 
   async handleRequest(req, res) {
@@ -232,13 +136,36 @@ class GeminiDirectRelayService {
       }
 
       if (!targetModel) {
-        targetModel = this.modelMapping[model] || config.claudeToGeminiConversion?.defaultGeminiModel
+        targetModel =
+          this.modelMapping[model] || config.claudeToGeminiConversion?.defaultGeminiModel
       }
     }
 
     // 合并 System Prompt：如果用户没配，尝试用全局配置
     if (!systemPromptConfig && globalConfig?.geminiDirectGlobalSystemPrompt?.prompt) {
       systemPromptConfig = globalConfig.geminiDirectGlobalSystemPrompt
+    }
+
+    // DEBUG: 打印原始请求中的消息结构，用于调试 thoughtSignature 来源
+    if (req.body.messages) {
+      for (let i = 0; i < req.body.messages.length; i++) {
+        const msg = req.body.messages[i]
+        if (Array.isArray(msg.content)) {
+          for (const block of msg.content) {
+            if (block.signature || block.thought_signature || block.thoughtSignature) {
+              logger.info(`[GeminiDirect] Original request msg[${i}] has signature in block:`, {
+                role: msg.role,
+                blockType: block.type,
+                hasSignature: !!(
+                  block.signature ||
+                  block.thought_signature ||
+                  block.thoughtSignature
+                )
+              })
+            }
+          }
+        }
+      }
     }
 
     // 4. 转换请求 (New Direct Pipeline)
@@ -284,17 +211,16 @@ class GeminiDirectRelayService {
           })
         }
 
-        accountId = accountSelection.accountId
-        accountType = accountSelection.accountType
+        ;({ accountId, accountType } = accountSelection)
 
         let account
-        let authHeader
+        let _authHeader
         let endpointBase
 
         // 3. 获取账号详情和认证信息
         if (accountType === 'gemini-api') {
           account = await geminiApiAccountService.getAccount(accountId)
-          authHeader = {} // API Key goes in query param
+          _authHeader = {} // API Key goes in query param
           // API Key 账户使用公网 API (generativelanguage.googleapis.com)
           endpointBase = account.baseUrl || GEMINI_PUBLIC_API_BASE
         } else {
@@ -312,7 +238,7 @@ class GeminiDirectRelayService {
           }
 
           const { accessToken } = account
-          authHeader = { Authorization: `Bearer ${accessToken}` }
+          _authHeader = { Authorization: `Bearer ${accessToken}` }
 
           // OAuth 账户强制使用 Google Cloud Code PA API (v1internal)
           endpointBase = GEMINI_PA_API_BASE
@@ -325,9 +251,6 @@ class GeminiDirectRelayService {
         // 5. 发送请���
         if (accountType === 'gemini-api') {
           // --- API Key 账户逻辑 ---
-          let url
-          let requestData
-
           let modelName = targetModel
           if (
             !modelName.startsWith('models/') &&
@@ -338,10 +261,10 @@ class GeminiDirectRelayService {
           }
 
           const action = stream ? 'streamGenerateContent' : 'generateContent'
-          url = `${endpointBase}/${modelName}:${action}?alt=sse&key=${account.apiKey}`
+          const url = `${endpointBase}/${modelName}:${action}?alt=sse&key=${account.apiKey}`
 
           // API Key 账户直接使用转换后的 body，但需要清洗 id
-          requestData = this._sanitizeForApiKey(geminiBody)
+          const requestData = this._sanitizeForApiKey(geminiBody)
 
           const axiosConfig = {
             method: 'POST',
@@ -397,7 +320,10 @@ class GeminiDirectRelayService {
           }
 
           const userPromptId = `${uuidv4()}########0`
-          const sessionId = req.apiKey?.id || req.user?.id
+          // Session ID 需要包含项目信息，因为 Gemini session 是项目级别的
+          // 跨项目使用相同的 session_id 会导致 400 INVALID_ARGUMENT
+          const projectId = account.projectId || account.tempProjectId
+          const sessionId = `${req.apiKey?.id || req.user?.id}_${projectId}`
 
           // 获取 OAuth Client
           const client = await geminiAccountService.getOauthClient(
@@ -416,7 +342,7 @@ class GeminiDirectRelayService {
               client,
               requestData,
               userPromptId,
-              account.projectId || account.tempProjectId,
+              projectId,
               sessionId,
               null, // signal
               account.proxy
@@ -437,7 +363,7 @@ class GeminiDirectRelayService {
               client,
               requestData,
               userPromptId,
-              account.projectId || account.tempProjectId,
+              projectId,
               sessionId,
               account.proxy
             )
@@ -463,10 +389,31 @@ class GeminiDirectRelayService {
         lastError = error
         retries++
 
+        // 尝试读取错误响应体（如果是流）
+        let errorDetails = error.response?.data
+        if (errorDetails && typeof errorDetails === 'object' && errorDetails.readable) {
+          // 这是一个流对象，尝试读取它
+          try {
+            const chunks = []
+            for await (const chunk of errorDetails) {
+              chunks.push(chunk)
+            }
+            errorDetails = Buffer.concat(chunks).toString('utf-8')
+            try {
+              errorDetails = JSON.parse(errorDetails)
+            } catch (e) {
+              // 保持字符串格式
+            }
+          } catch (readError) {
+            logger.warn('[GeminiDirect] Failed to read error response stream:', readError.message)
+            errorDetails = '[Unable to read error stream]'
+          }
+        }
+
         logger.error(`[GeminiDirect] Request failed (Attempt ${retries}/${MAX_RETRIES}):`, {
           message: error.message,
           status: error.response?.status,
-          response: error.response?.data
+          response: errorDetails
         })
 
         // Handle Rate Limits (429) or Service Unavailable (503)
@@ -523,7 +470,14 @@ class GeminiDirectRelayService {
     })
   }
 
-  async _handleStreamResponse(axiosResponse, res, originalModel, apiKeyId, accountId, accountType) {
+  async _handleStreamResponse(
+    axiosResponse,
+    res,
+    originalModel,
+    apiKeyId,
+    accountId,
+    _accountType
+  ) {
     // Generate a unique request ID for this stream handling
     const streamRequestId = `sr_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`
     logger.info(
@@ -616,11 +570,15 @@ class GeminiDirectRelayService {
             writeResult = res.write(sseData)
             // 详细日志：记录实际发送的内容
             if (event.type === 'content_block_delta' && event.delta) {
-              const deltaContent = event.delta.text || event.delta.thinking || event.delta.signature || ''
+              const deltaContent =
+                event.delta.text || event.delta.thinking || event.delta.signature || ''
               logger.info(
                 `[GeminiDirect] Event #${eventCount} type=${event.type}, index=${event.index}, deltaType=${event.delta.type}, content="${deltaContent.substring(0, 100)}..."`
               )
-            } else if (event.type === 'content_block_start' || event.type === 'content_block_stop') {
+            } else if (
+              event.type === 'content_block_start' ||
+              event.type === 'content_block_stop'
+            ) {
               logger.info(
                 `[GeminiDirect] Event #${eventCount} type=${event.type}, index=${event.index}, blockType=${event.content_block?.type || 'N/A'}`
               )
@@ -676,100 +634,90 @@ class GeminiDirectRelayService {
   }
 
   async *_geminiChunkGenerator(dataStream) {
-    // Use proper buffering to handle SSE data split across chunks
+    // 使用事件监听替代 for-await 循环
+    // 原因：Gemini PA API 返回 Content-Length: 0，导致 for-await 不执行
     logger.info(
-      `[GeminiDirect] Starting chunk generator, dataStream type: ${typeof dataStream}, isNull: ${dataStream === null}, isUndefined: ${dataStream === undefined}`
+      `[GeminiDirect] Starting chunk generator, dataStream type: ${typeof dataStream}, constructor: ${dataStream?.constructor?.name || 'unknown'}`
     )
 
-    // Debug: Check if dataStream is iterable
-    if (dataStream) {
-      logger.info(
-        `[GeminiDirect] dataStream constructor: ${dataStream.constructor?.name || 'unknown'}`
-      )
-      logger.info(
-        `[GeminiDirect] dataStream has on: ${typeof dataStream.on}, has pipe: ${typeof dataStream.pipe}`
-      )
-
-      // Add event listeners to debug stream behavior
-      let streamEnded = false
-      let streamErrored = false
-      dataStream.on('end', () => {
-        streamEnded = true
-        logger.info('[GeminiDirect] dataStream "end" event fired')
-      })
-      dataStream.on('close', () => {
-        logger.info('[GeminiDirect] dataStream "close" event fired')
-      })
-      dataStream.on('error', (err) => {
-        streamErrored = true
-        logger.error('[GeminiDirect] dataStream "error" event:', err)
-      })
-
-      // Check if stream is already ended
-      if (dataStream.readableEnded) {
-        logger.warn(
-          '[GeminiDirect] WARNING: dataStream.readableEnded is already true before iteration!'
-        )
-      }
-      if (dataStream.destroyed) {
-        logger.warn(
-          '[GeminiDirect] WARNING: dataStream.destroyed is already true before iteration!'
-        )
-      }
+    if (!dataStream) {
+      logger.error('[GeminiDirect] dataStream is null or undefined')
+      return
     }
 
-    // Proper SSE parsing with cross-chunk buffering
     let buffer = ''
     let rawChunkCount = 0
     let totalRawBytes = 0
     let yieldCount = 0
     const decoder = new StringDecoder('utf8')
 
-    try {
-      logger.info('[GeminiDirect] Entering for-await loop on dataStream...')
-      for await (const rawChunk of dataStream) {
-        rawChunkCount++
-        // CRITICAL: Use StringDecoder to handle multi-byte characters split across chunks
-        const chunkStr = decoder.write(rawChunk)
-        totalRawBytes += rawChunk.length
-        logger.info(
-          `[GeminiDirect] Raw chunk #${rawChunkCount}: length=${chunkStr.length}, first100chars=${chunkStr.substring(0, 100).replace(/\n/g, '\\n')}`
-        )
+    // 创建一个队列来存储解析后的 chunks
+    const chunks = []
+    let resolveNext = null
+    let streamEnded = false
+    let streamError = null
 
-        // Append to buffer
-        buffer += chunkStr
+    // 处理 SSE 数据的辅助函数
+    const processBuffer = () => {
+      const parts = buffer.split('\n\n')
+      buffer = parts.pop() || ''
 
-        // Split by double newline (SSE event separator)
-        const parts = buffer.split('\n\n')
-
-        // Keep the last part in buffer (might be incomplete)
-        buffer = parts.pop() || ''
-
-        // Process complete events
-        for (const part of parts) {
-          const lines = part.split('\n')
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              const data = line.slice(6).trim()
-              if (data && data !== '[DONE]') {
-                try {
-                  yieldCount++
-                  yield JSON.parse(data)
-                } catch (e) {
-                  logger.debug(
-                    '[GeminiDirect] Failed to parse JSON:',
-                    e.message,
-                    'data:',
-                    data.substring(0, 100)
-                  )
+      for (const part of parts) {
+        const lines = part.split('\n')
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6).trim()
+            if (data && data !== '[DONE]') {
+              try {
+                const parsed = JSON.parse(data)
+                chunks.push(parsed)
+                // 如果有等待的 Promise，立即 resolve
+                if (resolveNext) {
+                  resolveNext()
+                  resolveNext = null
                 }
+              } catch (e) {
+                logger.warn('[GeminiDirect] Failed to parse JSON chunk', {
+                  error: e.message,
+                  dataPreview: data.substring(0, 200),
+                  dataLength: data.length,
+                  rawChunkCount
+                })
               }
             }
           }
         }
       }
+    }
 
-      // Process any remaining buffer
+    // 设置事件监听器
+    dataStream.on('data', (rawChunk) => {
+      rawChunkCount++
+      const chunkStr = decoder.write(rawChunk)
+      totalRawBytes += rawChunk.length
+
+      logger.debug(
+        `[GeminiDirect] Raw chunk #${rawChunkCount}: bytes=${rawChunk.length}, chars=${chunkStr.length}`
+      )
+
+      buffer += chunkStr
+      processBuffer()
+    })
+
+    dataStream.on('end', () => {
+      logger.info('[GeminiDirect] dataStream "end" event fired')
+
+      // 处理 StringDecoder 残留的多字节字符
+      const remaining = decoder.end()
+      if (remaining) {
+        logger.debug(
+          '[GeminiDirect] StringDecoder end() returned remaining bytes:',
+          remaining.length
+        )
+        buffer += remaining
+      }
+
+      // 处理剩余 buffer
       if (buffer.trim()) {
         const lines = buffer.split('\n')
         for (const line of lines) {
@@ -777,17 +725,56 @@ class GeminiDirectRelayService {
             const data = line.slice(6).trim()
             if (data && data !== '[DONE]') {
               try {
-                yieldCount++
-                yield JSON.parse(data)
+                const parsed = JSON.parse(data)
+                chunks.push(parsed)
               } catch (e) {
-                logger.debug('[GeminiDirect] Failed to parse remaining JSON:', e.message)
+                logger.warn('[GeminiDirect] Failed to parse remaining JSON', {
+                  error: e.message,
+                  dataPreview: data.substring(0, 200),
+                  dataLength: data.length
+                })
               }
             }
           }
         }
       }
-    } catch (streamError) {
-      logger.error('[GeminiDirect] Stream iteration error:', streamError)
+
+      streamEnded = true
+      if (resolveNext) {
+        resolveNext()
+        resolveNext = null
+      }
+    })
+
+    dataStream.on('error', (err) => {
+      logger.error('[GeminiDirect] dataStream "error" event:', err)
+      streamError = err
+      streamEnded = true
+      if (resolveNext) {
+        resolveNext()
+        resolveNext = null
+      }
+    })
+
+    dataStream.on('close', () => {
+      logger.debug('[GeminiDirect] dataStream "close" event fired')
+    })
+
+    // 使用 yield 返回解析后的 chunks
+    while (!streamEnded || chunks.length > 0) {
+      if (chunks.length > 0) {
+        yieldCount++
+        yield chunks.shift()
+      } else if (!streamEnded) {
+        // 等待新数据或流结束
+        await new Promise((resolve) => {
+          resolveNext = resolve
+        })
+      }
+    }
+
+    if (streamError) {
+      logger.error('[GeminiDirect] Stream completed with error:', streamError)
     }
 
     logger.info(

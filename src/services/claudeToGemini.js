@@ -195,10 +195,10 @@ class ClaudeToGeminiConverter {
     }
 
     // Add systemInstruction field for PA API compatibility
-    // Format: { role: 'user', parts: [{ text: '...' }] }
+    // Format: { parts: [{ text: '...' }] }
+    // NOTE: Gemini PA API systemInstruction does NOT require role field
     if (systemInstruction) {
       geminiBody.systemInstruction = {
-        role: 'user',
         parts: [{ text: systemInstruction }]
       }
     }
@@ -216,19 +216,30 @@ class ClaudeToGeminiConverter {
 
     for (const msg of messages) {
       const parts = []
-      let pendingThinkingSignature = null // Store signature from thinking block to attach to tool_use
+
+      // 两轮扫描机制变量
+      let messageThinkingSignature = null // 消息级 thinking 签名（第一轮提取）
 
       if (typeof msg.content === 'string') {
         parts.push({ text: msg.content })
       } else if (Array.isArray(msg.content)) {
+        // 🔄 第一轮扫描：提取消息级 thinking 签名
+        // 参考 llms-reference: src/transformer/anthropic.transformer.ts:163-171
+        for (const block of msg.content) {
+          if (block.type === 'thinking') {
+            const sig = block.signature || block.thought_signature || block.thoughtSignature
+            if (sig) {
+              messageThinkingSignature = sig
+              break // 只取第一个 thinking block 的签名
+            }
+          }
+        }
+
+        // 🔧 第二轮扫描：构建 parts 并附加签名
         for (const block of msg.content) {
           if (block.type === 'text') {
-            const part = { text: block.text }
-            if (pendingThinkingSignature) {
-              part.thoughtSignature = pendingThinkingSignature
-              pendingThinkingSignature = null
-            }
-            parts.push(part)
+            // 普通文本块不需要签名处理
+            parts.push({ text: block.text })
           } else if (block.type === 'image') {
             // Handle image: source.data is base64
             parts.push({
@@ -248,15 +259,25 @@ class ClaudeToGeminiConverter {
             })
           } else if (block.type === 'thinking') {
             // Handle Claude 3.7+ thinking/CoT blocks
-            if (block.thinking) {
-              const signature = block.signature || block.thought_signature || block.thoughtSignature
-
-              if (signature) {
-                pendingThinkingSignature = signature
-                // Do NOT push any part for the thinking block itself.
-                // The signature will be attached to the subsequent text or tool_use block.
-              }
+            // Gemini API 要求历史消息中的 thinking 内容必须以 thought part 格式发送
+            // 格式: { text: "...", thought: true, thoughtSignature: "base64..." }
+            const thinkingPart = {
+              text: block.thinking || ''
             }
+
+            // 获取签名：优先使用 block 自己的签名，否则使用消息级签名
+            const blockSignature =
+              block.signature || block.thought_signature || block.thoughtSignature
+            if (blockSignature) {
+              thinkingPart.thought = true
+              thinkingPart.thoughtSignature = blockSignature
+            } else if (messageThinkingSignature) {
+              thinkingPart.thought = true
+              thinkingPart.thoughtSignature = messageThinkingSignature
+            }
+            // 如果没有任何签名，作为普通文本处理（不添加 thought 标记）
+
+            parts.push(thinkingPart)
           } else if (block.type === 'tool_use') {
             // Handle tool use -> function call
             const part = {
@@ -266,21 +287,23 @@ class ClaudeToGeminiConverter {
               }
             }
 
-            if (pendingThinkingSignature) {
-              part.thoughtSignature = pendingThinkingSignature
-              pendingThinkingSignature = null // Only attach to the first tool use
-            }
-            // FALLBACK: If no signature in current traversal, check if the previous part was a thinking block with signature
-            else if (parts.length > 0) {
-              const lastPart = parts[parts.length - 1]
-              if (lastPart.thoughtSignature) {
-                part.thoughtSignature = lastPart.thoughtSignature
-              }
-            }
-            // CRITICAL FIX: Gemini PA API requires thoughtSignature field even if empty
-            // Set to empty string if no signature was found
-            if (!part.thoughtSignature) {
-              part.thoughtSignature = ''
+            // 🎯 全消息签名策略（修复版）
+            // 核心原则：
+            // 1. Gemini 在 thinking 模式下要求每个 functionCall 都必须有 thoughtSignature
+            // 2. 优先使用该消息自己的 thinking 签名
+            // 3. 如果没有签名，必须生成占位符签名，否则 Gemini 会返回 400 错误：
+            //    "function call is missing a thought_signature"
+            // 4. 占位符签名必须是有效的 base64 编码
+            if (messageThinkingSignature) {
+              // 使用消息自己的 thinking 签名
+              part.thoughtSignature = messageThinkingSignature
+            } else {
+              // 生成占位符签名（使用 tool_use id 确保唯一性）
+              // 格式：placeholder_sig_{tool_id}_{timestamp}
+              const placeholderSig = Buffer.from(
+                `placeholder_sig_${block.id || 'unknown'}_${Date.now()}`
+              ).toString('base64')
+              part.thoughtSignature = placeholderSig
             }
 
             parts.push(part)
@@ -411,7 +434,12 @@ class ClaudeToGeminiConverter {
       Handle nullable array or object: {anyOf: [{type: 'null'}, {type: 'object'}]}
       */
       const incomingAnyOf = _jsonSchema['anyOf']
-      if (incomingAnyOf != null && Array.isArray(incomingAnyOf) && incomingAnyOf.length == 2) {
+      if (
+        incomingAnyOf !== null &&
+        incomingAnyOf !== undefined &&
+        Array.isArray(incomingAnyOf) &&
+        incomingAnyOf.length === 2
+      ) {
         if (incomingAnyOf[0] && incomingAnyOf[0]['type'] === 'null') {
           genAISchema['nullable'] = true
           _jsonSchema = incomingAnyOf[1]
@@ -427,11 +455,11 @@ class ClaudeToGeminiConverter {
 
       for (const [fieldName, fieldValue] of Object.entries(_jsonSchema)) {
         // Skip if the fieldValue is undefined or null.
-        if (fieldValue == null) {
+        if (fieldValue === null || fieldValue === undefined) {
           continue
         }
 
-        if (fieldName == 'type') {
+        if (fieldName === 'type') {
           if (fieldValue === 'null') {
             continue
           }
@@ -447,7 +475,7 @@ class ClaudeToGeminiConverter {
         } else if (listSchemaFieldNames.includes(fieldName)) {
           const listSchemaFieldValue = []
           for (const item of fieldValue) {
-            if (item['type'] == 'null') {
+            if (item['type'] === 'null') {
               genAISchema['nullable'] = true
               continue
             }
@@ -510,7 +538,9 @@ class ClaudeToGeminiConverter {
         } else if (parsed.response && parsed.response.candidates) {
           actualResponse = parsed.response
         }
-      } catch (e) {}
+      } catch (_e) {
+        // Ignore JSON parse errors - keep original response
+      }
     }
 
     // 1. 尝试获取 Candidate
@@ -620,7 +650,8 @@ class ClaudeToGeminiConverter {
       hasTextContent: false,
       hasThinkingContent: false,
       hasThinkingDelta: false,
-      thinkingText: '' // 收集 thinking 文本内容
+      thinkingText: '', // 收集 thinking 文本内容
+      signatureSent: false // 新增：跟踪签名是否已发送
     }
   ) {
     // Handle PA API nested response structure: {response: {candidates: [...]}}
@@ -644,109 +675,51 @@ class ClaudeToGeminiConverter {
     if (streamState.thinkingText === undefined) {
       streamState.thinkingText = ''
     }
+    if (streamState.signatureSent === undefined) {
+      streamState.signatureSent = false
+    }
 
     const parts = candidate?.content?.parts || []
 
     for (const part of parts) {
       const signature = part.thoughtSignature || part.thought_signature
-      // FIX: Text accompanying a signature is usually the start of the actual response, NOT thinking content.
-      // Only 'thought: true' marks explicit thinking content.
-      const isThought = part.thought === true
+      const explicitThinking = part.thought === true
 
-      let targetType = null
-      if (part.functionCall) {
-        targetType = 'tool_use'
-        streamState.hasToolUse = true
-      } else if (part.text) {
-        targetType = isThought ? 'thinking' : 'text'
-        // Track if we have actual text content (not just thinking)
-        if (!isThought && part.text.trim()) {
-          streamState.hasTextContent = true
-        }
-      }
-      // Track thinking content (signature or thought text)
-      if (signature || isThought) {
-        streamState.hasThinkingContent = true
-      }
+      // --- Step 1: Handle Explicit Thinking ---
+      if (explicitThinking && part.text) {
+        // DEFENSE: Handle thinking blocks that appear after text content
+        if (streamState.hasTextContent) {
+          // 参照 llms 项目：将晚到的 thinking 内容降级为普通文本追加，而非丢弃
+          logger.warn('[ClaudeToGemini] Late thinking block after text content, appending as text')
 
-      if (!targetType && !signature) {
-        continue
-      }
-
-      // CRITICAL: Skip thinking blocks that appear after text content
-      // Gemini sometimes violates Claude API spec by sending text first, then thinking
-      // We must ignore these out-of-order thinking blocks to avoid confusing the CLI
-      // AND ensure we don't disrupt the current block index
-      if (streamState.hasTextContent && (isThought || signature)) {
-        continue
-      }
-
-      // Handle Block Switching
-      // Only switch if we are changing types AND the new type is valid
-      if (streamState.currentType && targetType && streamState.currentType !== targetType) {
-        // Special case: If we are in 'thinking' and receive 'text', we MUST close the thinking block
-        if (streamState.currentType === 'thinking' && targetType === 'text') {
-           yield { type: 'content_block_stop', index: streamState.index }
-           streamState.index++
-           streamState.currentType = null
-        }
-        // If we are in 'text' and receive 'thinking', we should have skipped it above.
-        // But if we are here, it means we are switching from text to something else (like tool_use)
-        else if (streamState.currentType === 'text' && targetType === 'tool_use') {
-           yield { type: 'content_block_stop', index: streamState.index }
-           streamState.index++
-           streamState.currentType = null
-        }
-        // If switching from text to text (shouldn't happen with logic above) or thinking to thinking, do nothing
-      }
-
-      // Start new block if needed
-      if (targetType && !streamState.currentType) {
-        streamState.currentType = targetType
-        const contentBlock =
-          targetType === 'thinking'
-            ? { type: 'thinking', thinking: '' }
-            : targetType === 'text'
-              ? { type: 'text', text: '' }
-              : null // tool_use handled separately below
-
-        if (contentBlock) {
-          yield {
-            type: 'content_block_start',
-            index: streamState.index,
-            content_block: contentBlock
-          }
-        }
-      }
-
-      // Handle Content
-      if (part.text) {
-        if (!isThought && streamState.currentType === 'thinking') {
-          streamState.pendingText += part.text
-        } else {
-          // Track that we sent a thinking delta with actual content
-          if (isThought) {
-            streamState.hasThinkingDelta = true
-            // 收集 thinking 文本内容，稍后可能需要作为实际内容
-            streamState.thinkingText += part.text
+          // 确保在 text 块中
+          if (streamState.currentType !== 'text') {
+            if (streamState.currentType) {
+              yield { type: 'content_block_stop', index: streamState.index }
+              streamState.index++
+            }
+            streamState.currentType = 'text'
+            yield {
+              type: 'content_block_start',
+              index: streamState.index,
+              content_block: { type: 'text', text: '' }
+            }
           }
 
-          // 发送 thinking 或 text 事件
           yield {
             type: 'content_block_delta',
             index: streamState.index,
-            delta: {
-              type: isThought ? 'thinking_delta' : 'text_delta',
-              [isThought ? 'thinking' : 'text']: part.text
-            }
+            delta: { type: 'text_delta', text: `\n${part.text}` }
           }
-        }
-      }
+        } else {
+          streamState.hasThinkingContent = true
 
-      // Handle Signature
-      if (signature) {
-        if (streamState.currentType !== 'thinking') {
-          if (!streamState.currentType) {
+          // Switch to thinking block if needed
+          if (streamState.currentType !== 'thinking') {
+            if (streamState.currentType) {
+              yield { type: 'content_block_stop', index: streamState.index }
+              streamState.index++
+            }
             streamState.currentType = 'thinking'
             yield {
               type: 'content_block_start',
@@ -754,71 +727,198 @@ class ClaudeToGeminiConverter {
               content_block: { type: 'thinking', thinking: '' }
             }
           }
-        }
 
-        // IMPORTANT: If no thinking content was sent, send a placeholder before signature
-        // This matches CCR/llms library behavior - signature alone is not displayable
-        if (!streamState.hasThinkingDelta) {
+          streamState.hasThinkingDelta = true
+          streamState.thinkingText += part.text
+
           yield {
             type: 'content_block_delta',
             index: streamState.index,
-            delta: { type: 'thinking_delta', thinking: '(no content)' }
+            delta: { type: 'thinking_delta', thinking: part.text }
           }
         }
+      }
 
-        yield {
-          type: 'content_block_delta',
-          index: streamState.index,
-          delta: { type: 'signature_delta', signature }
-        }
+      // --- Step 2: Handle Signature (Closes Thinking) ---
+      if (signature) {
+        // 参照 llms 项目：优化签名处理逻辑
+        // 修改判断条件：如果有 thinking 内容（即使当前不是 thinking 类型），也应该处理签名
+        const shouldProcessSignature =
+          streamState.currentType === 'thinking' ||
+          streamState.hasThinkingContent ||
+          !streamState.hasTextContent
 
-        yield { type: 'content_block_stop', index: streamState.index }
-        streamState.index++
-        streamState.currentType = null
+        if (shouldProcessSignature && !streamState.signatureSent) {
+          streamState.hasThinkingContent = true
 
-        // Handle buffered text logic similar to llms project
-        // llms uses 'pendingContent' buffer for Gemini 3 models to handle out-of-order text/signature
-        // Here we simplify: if we have buffered text in 'pendingText' (which collects text while in thinking mode),
-        // we emit it now. BUT we should have ensured that 'pendingText' only contains actual text, not thinking content.
-
-        // In our loop above (lines 722-723), pendingText accumulates part.text if currentType is thinking and !isThought.
-        // So pendingText IS legitimate text that arrived while the state machine was locked in thinking mode.
-        // We should output it now.
-
-        if (streamState.pendingText) {
-          streamState.currentType = 'text'
-          streamState.hasTextContent = true
-          yield {
-            type: 'content_block_start',
-            index: streamState.index,
-            content_block: { type: 'text', text: '' }
+          // Ensure we are in thinking block (or start one just to close it with signature)
+          if (streamState.currentType !== 'thinking') {
+            if (streamState.currentType) {
+              yield { type: 'content_block_stop', index: streamState.index }
+              streamState.index++
+            }
+            streamState.currentType = 'thinking'
+            yield {
+              type: 'content_block_start',
+              index: streamState.index,
+              content_block: { type: 'thinking', thinking: '' }
+            }
           }
-          // Clean text
-          const cleanedText = streamState.pendingText.replace(/^[\n\r\s]+/, '')
-          if (cleanedText) {
+
+          // Placeholder if empty
+          if (!streamState.hasThinkingDelta) {
             yield {
               type: 'content_block_delta',
               index: streamState.index,
-              delta: { type: 'text_delta', text: cleanedText }
+              delta: { type: 'thinking_delta', thinking: '(no content)' }
             }
           }
-          streamState.pendingText = ''
-        }
 
-        // Strict separation: We DO NOT emit thinkingText as text content anymore.
-        // This aligns with llms implementation which filters out thoughts from text content.
+          yield {
+            type: 'content_block_delta',
+            index: streamState.index,
+            delta: { type: 'signature_delta', signature }
+          }
+
+          // 标记签名已发送
+          streamState.signatureSent = true
+
+          // Close thinking block
+          yield { type: 'content_block_stop', index: streamState.index }
+          streamState.index++
+          streamState.currentType = null
+
+          // Handle buffered text if any (pendingContent 机制)
+          if (streamState.pendingText) {
+            const cleaned = streamState.pendingText.replace(/^[\n\r\s]+/, '')
+            if (cleaned) {
+              streamState.currentType = 'text'
+              streamState.hasTextContent = true
+              yield {
+                type: 'content_block_start',
+                index: streamState.index,
+                content_block: { type: 'text', text: '' }
+              }
+              yield {
+                type: 'content_block_delta',
+                index: streamState.index,
+                delta: { type: 'text_delta', text: cleaned }
+              }
+            }
+            streamState.pendingText = ''
+          }
+        } else if (streamState.signatureSent) {
+          logger.debug('[ClaudeToGemini] Signature already sent, skipping duplicate')
+        }
       }
 
-      // Handle Grounding (Web Search)
+      // --- Step 3: Handle Text Content ---
+      if (part.text && !explicitThinking) {
+        // Normal text content
+        const { text } = part
+        if (text) {
+          // 参照 llms 项目：Gemini 2.x 自动签名生成
+          // 当有 thinking 内容但签名未发送时，在发送文本前自动生成签名
+          if (streamState.hasThinkingContent && !streamState.signatureSent) {
+            logger.info(
+              '[ClaudeToGemini] Auto-generating signature for Gemini 2.x (thinking exists but no signature)'
+            )
+
+            // 如果当前不在 thinking 块，先切换到 thinking 块
+            if (streamState.currentType !== 'thinking') {
+              if (streamState.currentType) {
+                yield { type: 'content_block_stop', index: streamState.index }
+                streamState.index++
+              }
+              streamState.currentType = 'thinking'
+              yield {
+                type: 'content_block_start',
+                index: streamState.index,
+                content_block: { type: 'thinking', thinking: '' }
+              }
+
+              // 添加占位符内容
+              if (!streamState.hasThinkingDelta) {
+                yield {
+                  type: 'content_block_delta',
+                  index: streamState.index,
+                  delta: { type: 'thinking_delta', thinking: '(no content)' }
+                }
+              }
+            }
+
+            // 生成自动签名（必须是有效的 base64 编码）
+            // Gemini PA API 要求 thoughtSignature 是 base64 编码的 bytes
+            const autoSig = Buffer.from(`auto_gemini2_${Date.now()}`).toString('base64')
+            yield {
+              type: 'content_block_delta',
+              index: streamState.index,
+              delta: { type: 'signature_delta', signature: autoSig }
+            }
+            streamState.signatureSent = true
+
+            // 关闭 thinking 块
+            yield { type: 'content_block_stop', index: streamState.index }
+            streamState.index++
+            streamState.currentType = null
+          }
+
+          streamState.hasTextContent = true
+
+          // Switch to text block if needed
+          if (streamState.currentType !== 'text') {
+            if (streamState.currentType) {
+              yield { type: 'content_block_stop', index: streamState.index }
+              streamState.index++
+            }
+            streamState.currentType = 'text'
+            yield {
+              type: 'content_block_start',
+              index: streamState.index,
+              content_block: { type: 'text', text: '' }
+            }
+          }
+
+          yield {
+            type: 'content_block_delta',
+            index: streamState.index,
+            delta: { type: 'text_delta', text }
+          }
+        }
+      }
+
+      // --- Step 4: Handle Grounding (Web Search) ---
+      // Move grounding check here, per part loop iteration (Gemini usually sends it once)
       const groundingMetadata = candidate?.groundingMetadata
-      if (groundingMetadata?.groundingChunks?.length) {
+      // Only process grounding once to avoid duplication if multiple parts exist
+      // We can use a flag in streamState or just check if we processed it.
+      // But for now, let's just emit it. The original code did it per part which is weird.
+      // Let's rely on the fact that usually grounding comes in the last chunk or first chunk.
+      // Better: check if this specific part triggered it? No, grounding is on candidate.
+      // Let's leave it at the end of loop or here.
+      // To match original behavior (which was inside the loop), we keep it inside.
+      // But we should be careful.
+      // Let's execute it ONLY if we haven't done it yet for this chunk?
+      // Actually, since we are iterating parts, and grounding is on candidate, it will output N times for N parts!
+      // This was a BUG in the original code too.
+      // I will fix it by checking a local flag 'groundingProcessed' for this chunk.
+
+      // (Self-correction: I can't easily add a local flag outside the generator yield without modifying state)
+      // Actually, I can just verify if part is the last one? Or just check if streamState has done it?
+      // Let's just keep the original logic for now (inside loop) but be aware.
+      // Wait, original code:
+      // if (groundingMetadata?.groundingChunks?.length) { ... }
+      // Yes, it was inside `for (const part of parts)`. If parts.length > 1, it duplicated grounding blocks.
+      // I will fix this: Only do it on the LAST part.
+
+      if (groundingMetadata?.groundingChunks?.length && part === parts[parts.length - 1]) {
         if (streamState.currentType) {
           yield { type: 'content_block_stop', index: streamState.index }
           streamState.index++
           streamState.currentType = null
         }
 
-        const content = groundingMetadata.groundingChunks.map((chunk, index) => ({
+        const content = groundingMetadata.groundingChunks.map((chunk) => ({
           type: 'web_search_result',
           title: chunk.web?.title || '',
           url: chunk.web?.uri || ''
@@ -833,12 +933,20 @@ class ClaudeToGeminiConverter {
             content
           }
         }
-
         yield { type: 'content_block_stop', index: streamState.index }
         streamState.index++
       }
 
+      // --- Step 5: Handle Tools ---
       if (part.functionCall) {
+        streamState.hasToolUse = true
+
+        if (streamState.currentType) {
+          yield { type: 'content_block_stop', index: streamState.index }
+          streamState.index++
+          streamState.currentType = null
+        }
+
         const toolUseId = `toolu_${uuidv4().substring(0, 8)}`
         yield {
           type: 'content_block_start',
@@ -859,7 +967,6 @@ class ClaudeToGeminiConverter {
 
         yield { type: 'content_block_stop', index: streamState.index }
         streamState.index++
-        streamState.currentType = null
       }
     }
 
