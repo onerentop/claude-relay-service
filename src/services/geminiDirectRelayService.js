@@ -291,13 +291,23 @@ class GeminiDirectRelayService {
           const response = await axios(axiosConfig)
 
           if (stream) {
-            await this._handleStreamResponse(response, res, model, apiKeyId, accountId, accountType)
+            // 传入 targetModel 用于统计记录（Gemini 模型名），model 用于响应格式（原始请求模型名）
+            await this._handleStreamResponse(
+              response,
+              res,
+              model,
+              apiKeyId,
+              accountId,
+              accountType,
+              targetModel
+            )
           } else {
-            // Direct Response Conversion
+            // Direct Response Conversion - 使用原始模型名返回给客户端
             const claudeResponse = claudeToGemini.convertResponse(response.data, model)
             res.json(claudeResponse)
             if (claudeResponse.usage) {
-              this._recordUsage(apiKeyId, claudeResponse.usage, model, accountId)
+              // 使用 targetModel（Gemini 模型名）进行统计记录
+              this._recordUsage(apiKeyId, claudeResponse.usage, targetModel, accountId)
             }
           }
           return // Success, exit loop and function
@@ -349,14 +359,15 @@ class GeminiDirectRelayService {
               account.proxy
             )
 
-            // 处理流式响应
+            // 处理流式响应 - 传入 targetModel 用于统计记录
             await this._handleStreamResponse(
               { data: streamResponse },
               res,
               model,
               apiKeyId,
               accountId,
-              accountType
+              accountType,
+              targetModel
             )
           } else {
             // 调用非流式接口
@@ -370,11 +381,12 @@ class GeminiDirectRelayService {
             )
 
             try {
-              // Direct Response Conversion
+              // Direct Response Conversion - 使用原始模型名返回给客户端
               const claudeResponse = claudeToGemini.convertResponse(responseData, model)
               res.json(claudeResponse)
               if (claudeResponse.usage) {
-                this._recordUsage(apiKeyId, claudeResponse.usage, model, accountId)
+                // 使用 targetModel（Gemini 模型名）进行统计记录
+                this._recordUsage(apiKeyId, claudeResponse.usage, targetModel, accountId)
               }
             } catch (convertError) {
               logger.error(
@@ -477,12 +489,16 @@ class GeminiDirectRelayService {
     originalModel,
     apiKeyId,
     accountId,
-    _accountType
+    _accountType,
+    statsModel = null // Gemini 模型名，用于统计记录；如果不传则使用 originalModel
   ) {
+    // 统计使用的模型名：优先使用 statsModel（Gemini 模型名），否则使用 originalModel
+    const modelForStats = statsModel || originalModel
+
     // Generate a unique request ID for this stream handling
     const streamRequestId = `sr_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`
     logger.info(
-      `[GeminiDirect] [${streamRequestId}] Starting stream response handling for model: ${originalModel}`
+      `[GeminiDirect] [${streamRequestId}] Starting stream response handling for model: ${originalModel} (stats: ${modelForStats})`
     )
 
     // Set response headers using writeHead (same pattern as ccrRelayService)
@@ -543,17 +559,19 @@ class GeminiDirectRelayService {
         lastDataTime = Date.now()
 
         // Detailed chunk inspection
-        const chunkStr = JSON.stringify(chunk)
+        const chunkKeys = Object.keys(chunk || {})
+        const responseKeys = chunk.response ? Object.keys(chunk.response) : []
         logger.debug(
-          `[GeminiDirect] Received chunk #${chunkCount}: length=${chunkStr.length}, keys=${Object.keys(chunk || {}).join(',')}`
+          `[GeminiDirect] Chunk #${chunkCount}: keys=[${chunkKeys.join(',')}], response.keys=[${responseKeys.join(',')}]`
         )
 
-        if (chunk.usageMetadata) {
-          finalUsage.input_tokens = chunk.usageMetadata.promptTokenCount || finalUsage.input_tokens
-          finalUsage.output_tokens =
-            chunk.usageMetadata.candidatesTokenCount || finalUsage.output_tokens
+        // 兼容 PA API 的嵌套结构：usageMetadata 可能在 chunk 或 chunk.response 中
+        const usageMetadata = chunk.usageMetadata || chunk.response?.usageMetadata
+        if (usageMetadata) {
+          finalUsage.input_tokens = usageMetadata.promptTokenCount || finalUsage.input_tokens
+          finalUsage.output_tokens = usageMetadata.candidatesTokenCount || finalUsage.output_tokens
           finalUsage.cache_read_input_tokens =
-            chunk.usageMetadata.cachedContentTokenCount || finalUsage.cache_read_input_tokens
+            usageMetadata.cachedContentTokenCount || finalUsage.cache_read_input_tokens
         }
 
         let eventCount = 0
@@ -614,8 +632,19 @@ class GeminiDirectRelayService {
         logger.debug(`[GeminiDirect] res.end() callback fired - response fully sent`)
       })
 
-      // Record Usage asynchronously
-      this._recordUsage(apiKeyId, finalUsage, originalModel, accountId)
+      // Log usage data before recording
+      if (finalUsage.input_tokens === 0 && finalUsage.output_tokens === 0) {
+        logger.warn(
+          `[GeminiDirect] No usageMetadata captured from Gemini response! Model: ${originalModel} -> ${modelForStats}, Chunks: ${chunkCount}`
+        )
+      } else {
+        logger.info(
+          `[GeminiDirect] Usage captured - Model: ${modelForStats}, Input: ${finalUsage.input_tokens}, Output: ${finalUsage.output_tokens}, CacheRead: ${finalUsage.cache_read_input_tokens}`
+        )
+      }
+
+      // Record Usage asynchronously - 使用 modelForStats（Gemini 模型名）进行统计
+      this._recordUsage(apiKeyId, finalUsage, modelForStats, accountId)
     } catch (err) {
       logger.error('[GeminiDirect] Stream processing error:', err)
       if (!res.writableEnded) {
@@ -784,14 +813,25 @@ class GeminiDirectRelayService {
     }
 
     try {
-      await apiKeyService.recordUsage(
+      // 构建完整的 usage 对象
+      const usageObject = {
+        input_tokens: usage.input_tokens || 0,
+        output_tokens: usage.output_tokens || 0,
+        cache_creation_input_tokens: usage.cache_creation_input_tokens || 0,
+        cache_read_input_tokens: usage.cache_read_input_tokens || 0
+      }
+
+      // 使用 recordUsageWithDetails 获得完整的统计功能
+      await apiKeyService.recordUsageWithDetails(
         keyId,
-        usage.input_tokens || 0,
-        usage.output_tokens || 0,
-        0,
-        0,
+        usageObject,
         model,
-        accountId
+        accountId,
+        'gemini-direct'
+      )
+
+      logger.debug(
+        `[GeminiDirect] Usage recorded - Model: ${model}, Input: ${usageObject.input_tokens}, Output: ${usageObject.output_tokens}, CacheRead: ${usageObject.cache_read_input_tokens}`
       )
     } catch (e) {
       logger.error('[GeminiDirect] Failed to record usage:', e)
