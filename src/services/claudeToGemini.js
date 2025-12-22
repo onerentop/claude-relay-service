@@ -295,6 +295,17 @@ class ClaudeToGeminiConverter {
             const sig = messageThinkingSignature || block.thought_signature || block.thoughtSignature
             if (sig) {
               part.thoughtSignature = sig
+            } else {
+              // 🔧 回退机制：当缺失签名时使用 Gemini 官方提供的跳过验证器值
+              // 参考: https://docs.cloud.google.com/vertex-ai/generative-ai/docs/thought-signatures
+              // "For rare legacy cases where signatures weren't originally provided,
+              //  you can set thought_signature to skip_thought_signature_validator"
+              // 注意：这会对模型性能产生负面影响，应作为最后手段
+              part.thoughtSignature = 'skip_thought_signature_validator'
+              logger.warn(
+                '[ClaudeToGemini] Missing thought_signature for function call, using skip_thought_signature_validator fallback',
+                { toolName: block.name }
+              )
             }
             parts.push(part)
           } else if (block.type === 'tool_result') {
