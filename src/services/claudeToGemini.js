@@ -148,32 +148,35 @@ class ClaudeToGeminiConverter {
       geminiBody.generationConfig.stopSequences = claudeBody.stop_sequences
     }
 
-    // Handle thinking/reasoning config (Align with musistudio/llms)
+    // 🎯 根据 gemini-cli 官方做法 (client.ts:58-67):
+    // 只有 Gemini 2.5 模型支持 thinkingConfig
+    // Gemini 3 模型不支持 thinkingLevel，会返回 400 错误
+    // 参考: D:\workspace\projects\gemini-cli\packages\core\src\core\client.ts
+    const isThinkingSupported = (model) => {
+      if (!model) return false
+      // 官方 gemini-cli 只检查 gemini-2.5，不包括 gemini-3
+      if (model.startsWith('gemini-2.5')) return true
+      return false
+    }
+
+    const isThinkingDefault = (model) => {
+      if (!model) return false
+      if (model.startsWith('gemini-2.5-flash-lite')) return false
+      if (model.startsWith('gemini-2.5')) return true
+      return false
+    }
+
+    // Handle thinking/reasoning config
+    // 只对 Gemini 2.5 模型添加 thinkingConfig
     if (thinking || (reasoning && reasoning.effort)) {
-      geminiBody.generationConfig.thinkingConfig = {
-        includeThoughts: true
-      }
-
-      // Check target model for Gemini 3 specific logic
-      const isGemini3 = targetModel && targetModel.includes('gemini-3')
-
-      if (isGemini3) {
-        // Gemini 3 uses thinkingLevel
-        if (reasoning && reasoning.effort) {
-          geminiBody.generationConfig.thinkingConfig.thinkingLevel = reasoning.effort.toUpperCase()
-        } else if (thinking && thinking.budget_tokens) {
-          // Map budget to level (Reference: llms/src/utils/thinking.ts)
-          const budget = thinking.budget_tokens
-          if (budget <= 1024) {
-            geminiBody.generationConfig.thinkingConfig.thinkingLevel = 'LOW'
-          } else if (budget <= 8192) {
-            geminiBody.generationConfig.thinkingConfig.thinkingLevel = 'MEDIUM'
-          } else {
-            geminiBody.generationConfig.thinkingConfig.thinkingLevel = 'HIGH'
-          }
+      // 用户明确请求了 thinking 模式
+      // 只有 Gemini 2.5 支持 thinkingConfig
+      if (isThinkingSupported(targetModel)) {
+        geminiBody.generationConfig.thinkingConfig = {
+          includeThoughts: true
         }
-      } else {
-        // Gemini 2 uses thinkingBudget
+
+        // Gemini 2.5 uses thinkingBudget
         const MAX_BUDGET = 32768
         if (thinking && thinking.budget_tokens) {
           let budget = thinking.budget_tokens
@@ -183,8 +186,16 @@ class ClaudeToGeminiConverter {
           geminiBody.generationConfig.thinkingConfig.thinkingBudget = budget
         }
       }
+      // Gemini 3 和其他模型不添加 thinkingConfig
+    } else if (isThinkingSupported(targetModel)) {
+      // 🎯 关键修复：即使用户没有请求 thinking，也需要为 Gemini 2.5 模型添加 thinkingConfig
+      // 否则 Gemini API 会返回 500 Internal Error
+      geminiBody.generationConfig.thinkingConfig = {
+        includeThoughts: true,
+        thinkingBudget: -1 // -1 表示无限制，与官方 gemini-cli 一致
+      }
     }
-    // Do NOT add thinkingConfig when tools are present - matches llms library behavior
+    // 对于 Gemini 3 和其他不支持 thinking 的模型，不添加 thinkingConfig
 
     if (geminiTools) {
       geminiBody.tools = geminiTools
@@ -224,7 +235,10 @@ class ClaudeToGeminiConverter {
         parts.push({ text: msg.content })
       } else if (Array.isArray(msg.content)) {
         // 🔄 第一轮扫描：提取消息级 thinking 签名
-        // 参考 llms-reference: src/transformer/anthropic.transformer.ts:163-171
+        // 根据 gemini-cli 官方做法 (client.ts:186-213)：
+        // - stripThoughts 默认为 false，保留 thoughtSignature
+        // - functionCall 必须保留 thoughtSignature，否则 API 报错
+        // 参考: D:\workspace\projects\gemini-cli\packages\core\src\core\client.ts
         for (const block of msg.content) {
           if (block.type === 'thinking') {
             const sig = block.signature || block.thought_signature || block.thoughtSignature
@@ -258,54 +272,28 @@ class ClaudeToGeminiConverter {
               }
             })
           } else if (block.type === 'thinking') {
-            // Handle Claude 3.7+ thinking/CoT blocks
-            // Gemini API 要求历史消息中的 thinking 内容必须以 thought part 格式发送
-            // 格式: { text: "...", thought: true, thoughtSignature: "base64..." }
-            const thinkingPart = {
-              text: block.thinking || ''
-            }
-
-            // 获取签名：优先使用 block 自己的签名，否则使用消息级签名
-            const blockSignature =
-              block.signature || block.thought_signature || block.thoughtSignature
-            if (blockSignature) {
-              thinkingPart.thought = true
-              thinkingPart.thoughtSignature = blockSignature
-            } else if (messageThinkingSignature) {
-              thinkingPart.thought = true
-              thinkingPart.thoughtSignature = messageThinkingSignature
-            }
-            // 如果没有任何签名，作为普通文本处理（不添加 thought 标记）
-
-            parts.push(thinkingPart)
+            // 🎯 根据 gemini-cli 官方做法 (geminiChat.ts:745):
+            // const visibleParts = content.parts.filter((part) => !part.thought);
+            // thought 部分（带 thought: true）会被过滤掉，不需要转换
+            // 但签名需要附加到同一消息的 functionCall 上
+            // 参考: D:\workspace\projects\gemini-cli\packages\core\src\core\geminiChat.ts
+            continue
           } else if (block.type === 'tool_use') {
-            // Handle tool use -> function call
+            // 🎯 根据 gemini-cli 官方做法 (client.ts:186-213):
+            // - stripThoughts 默认为 false，保留 thoughtSignature
+            // - functionCall 必须携带 thoughtSignature，否则 API 报错：
+            //   "function call is missing a thought_signature"
+            // 参考: D:\workspace\projects\gemini-cli\packages\core\src\core\client.ts
             const part = {
               functionCall: {
                 name: block.name,
                 args: block.input
               }
             }
-
-            // 🎯 全消息签名策略（修复版）
-            // 核心原则：
-            // 1. Gemini 在 thinking 模式下要求每个 functionCall 都必须有 thoughtSignature
-            // 2. 优先使用该消息自己的 thinking 签名
-            // 3. 如果没有签名，必须生成占位符签名，否则 Gemini 会返回 400 错误：
-            //    "function call is missing a thought_signature"
-            // 4. 占位符签名必须是有效的 base64 编码
+            // 🎯 关键：将 thinking 块的签名附加到 functionCall
             if (messageThinkingSignature) {
-              // 使用消息自己的 thinking 签名
               part.thoughtSignature = messageThinkingSignature
-            } else {
-              // 生成占位符签名（使用 tool_use id 确保唯一性）
-              // 格式：placeholder_sig_{tool_id}_{timestamp}
-              const placeholderSig = Buffer.from(
-                `placeholder_sig_${block.id || 'unknown'}_${Date.now()}`
-              ).toString('base64')
-              part.thoughtSignature = placeholderSig
             }
-
             parts.push(part)
           } else if (block.type === 'tool_result') {
             // For tool_result, we need 'functionResponse' part

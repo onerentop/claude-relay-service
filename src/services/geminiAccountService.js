@@ -1623,12 +1623,15 @@ async function generateContent(
   })
 
   // 非流式请求使用标准的 generateContent 端点
+  // 根据 gemini-cli 官方做法，添加 User-Agent 头
+  const userAgent = `GeminiCLI/1.0.0 (${process.platform}; ${process.arch})`
   const axiosConfig = {
     url: `${CODE_ASSIST_ENDPOINT}/${CODE_ASSIST_API_VERSION}:generateContent`,
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      'User-Agent': userAgent
     },
     data: request,
     responseType: 'json', // 接收JSON响应
@@ -1727,6 +1730,8 @@ async function generateContentStream(
     requestBody: JSON.stringify(request, null, 2).substring(0, 3000)
   })
 
+  // 根据 gemini-cli 官方做法，添加 User-Agent 头
+  const userAgent = `GeminiCLI/1.0.0 (${process.platform}; ${process.arch})`
   const axiosConfig = {
     url: `${CODE_ASSIST_ENDPOINT}/${CODE_ASSIST_API_VERSION}:streamGenerateContent`,
     method: 'POST',
@@ -1735,7 +1740,8 @@ async function generateContentStream(
     },
     headers: {
       Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      'User-Agent': userAgent
     },
     data: request,
     responseType: 'stream',

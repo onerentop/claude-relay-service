@@ -322,8 +322,10 @@ class GeminiDirectRelayService {
           const userPromptId = `${uuidv4()}########0`
           // Session ID 需要包含项目信息，因为 Gemini session 是项目级别的
           // 跨项目使用相同的 session_id 会导致 400 INVALID_ARGUMENT
-          const projectId = account.projectId || account.tempProjectId
-          const sessionId = `${req.apiKey?.id || req.user?.id}_${projectId}`
+          const projectId = account.projectId || account.tempProjectId || ''
+          // 确保 sessionId 格式正确，避免末尾带下划线
+          const baseSessionId = req.apiKey?.id || req.user?.id || uuidv4()
+          const sessionId = projectId ? `${baseSessionId}_${projectId}` : baseSessionId
 
           // 获取 OAuth Client
           const client = await geminiAccountService.getOauthClient(
