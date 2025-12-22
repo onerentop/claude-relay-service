@@ -10,7 +10,11 @@ const claudeToGemini = require('./claudeToGemini')
 
 const geminiAccountService = require('./geminiAccountService')
 const geminiApiAccountService = require('./geminiApiAccountService')
-const unifiedGeminiScheduler = require('./unifiedGeminiScheduler')
+const unifiedMixedScheduler = require('./unifiedMixedScheduler')
+const claudeRelayService = require('./claudeRelayService')
+const claudeConsoleRelayService = require('./claudeConsoleRelayService')
+const bedrockRelayService = require('./bedrockRelayService')
+const ccrRelayService = require('./ccrRelayService')
 const ProxyHelper = require('../utils/proxyHelper')
 const sessionHelper = require('../utils/sessionHelper')
 
@@ -182,11 +186,11 @@ class GeminiDirectRelayService {
       let accountType = null
 
       try {
-        // 2. 使用 Unified Scheduler 选择 Gemini 账号
+        // 2. 使用 Mixed Scheduler 选择账号（支持 Claude + Gemini 混合调度）
         const sessionHash = sessionHelper.generateSessionHash(req.body)
 
         try {
-          accountSelection = await unifiedGeminiScheduler.selectAccountForApiKey(
+          accountSelection = await unifiedMixedScheduler.selectAccountForApiKey(
             req.apiKey,
             sessionHash,
             targetModel,
@@ -202,12 +206,33 @@ class GeminiDirectRelayService {
             type: 'error',
             error: {
               type: 'service_unavailable',
-              message: error.message || 'No available Gemini accounts'
+              message: error.message || 'No available accounts'
             }
           })
         }
 
         ;({ accountId, accountType } = accountSelection)
+
+        // 🔀 账户类型分流：如果是 Claude 类型账户，委托给对应的 relay service
+        if (
+          accountType === 'claude-official' ||
+          accountType === 'claude-console' ||
+          accountType === 'bedrock' ||
+          accountType === 'ccr'
+        ) {
+          logger.info(
+            `[GeminiDirect] Selected Claude-type account: ${accountId} (${accountType}), delegating to native relay service`
+          )
+          return await this._delegateToClaudeRelayByType(
+            req,
+            res,
+            accountId,
+            accountType,
+            apiKeyId,
+            model,
+            sessionHash
+          )
+        }
 
         let account
         let _authHeader
@@ -433,12 +458,12 @@ class GeminiDirectRelayService {
         // Mark account as limited so the scheduler picks a different one next time
         if (accountId && (error.response?.status === 429 || error.response?.status === 503)) {
           logger.warn(
-            `[GeminiDirect] Account ${accountId} rate limited or overloaded. Marking as limited.`
+            `[GeminiDirect] Account ${accountId} (${accountType}) rate limited or overloaded. Marking as limited.`
           )
           // Use sessionHash to also clear sticky session
           const sessionHash = sessionHelper.generateSessionHash(req.body)
           try {
-            await unifiedGeminiScheduler.markAccountRateLimited(accountId, accountType, sessionHash)
+            await unifiedMixedScheduler.markAccountRateLimited(accountId, accountType, sessionHash)
           } catch (limitError) {
             logger.warn('[GeminiDirect] Failed to mark account as rate limited:', limitError)
           }
@@ -867,6 +892,207 @@ class GeminiDirectRelayService {
       }
     }
     return newBody
+  }
+
+  /**
+   * 🔀 委托给对应的 Claude Relay Service
+   * 当混合调度选中 Claude 类型账户时，将请求转发到原生 relay service
+   */
+  async _delegateToClaudeRelayByType(
+    req,
+    res,
+    accountId,
+    accountType,
+    apiKeyId,
+    model,
+    sessionHash
+  ) {
+    const { stream } = req.body
+
+    try {
+      if (accountType === 'claude-official') {
+        // Claude Official：使用 claudeRelayService
+        logger.info(`[GeminiDirect] Delegating to claudeRelayService for account ${accountId}`)
+
+        if (stream) {
+          await claudeRelayService.relayStreamRequestWithUsageCapture(
+            req.body,
+            req.apiKey,
+            res,
+            req.headers,
+            (usageData) => {
+              if (usageData?.input_tokens !== undefined) {
+                this._recordClaudeUsage(apiKeyId, usageData, model, accountId, 'claude-official')
+              }
+            }
+          )
+        } else {
+          const response = await claudeRelayService.relayRequest(
+            req.body,
+            req.apiKey,
+            req,
+            res,
+            req.headers
+          )
+          this._handleClaudeNonStreamResponse(res, response, apiKeyId, model, accountId)
+        }
+      } else if (accountType === 'claude-console') {
+        // Claude Console：使用 claudeConsoleRelayService
+        logger.info(
+          `[GeminiDirect] Delegating to claudeConsoleRelayService for account ${accountId}`
+        )
+
+        if (stream) {
+          // 参数顺序: requestBody, apiKeyData, responseStream, clientHeaders, usageCallback, accountId
+          await claudeConsoleRelayService.relayStreamRequestWithUsageCapture(
+            req.body,
+            req.apiKey,
+            res,
+            req.headers,
+            (usageData) => {
+              if (usageData?.input_tokens !== undefined) {
+                this._recordClaudeUsage(apiKeyId, usageData, model, accountId, 'claude-console')
+              }
+            },
+            accountId
+          )
+        } else {
+          // 参数顺序: requestBody, apiKeyData, clientRequest, clientResponse, clientHeaders, accountId
+          const response = await claudeConsoleRelayService.relayRequest(
+            req.body,
+            req.apiKey,
+            req,
+            res,
+            req.headers,
+            accountId
+          )
+          this._handleClaudeNonStreamResponse(res, response, apiKeyId, model, accountId)
+        }
+      } else if (accountType === 'bedrock') {
+        // Bedrock：使用 bedrockRelayService
+        logger.info(`[GeminiDirect] Delegating to bedrockRelayService for account ${accountId}`)
+
+        if (stream) {
+          await bedrockRelayService.handleStreamRequest(req, res, accountId, (usageData) => {
+            if (usageData?.input_tokens !== undefined) {
+              this._recordClaudeUsage(apiKeyId, usageData, model, accountId, 'bedrock')
+            }
+          })
+        } else {
+          await bedrockRelayService.handleRequest(req, res, accountId, (usageData) => {
+            if (usageData?.input_tokens !== undefined) {
+              this._recordClaudeUsage(apiKeyId, usageData, model, accountId, 'bedrock')
+            }
+          })
+        }
+      } else if (accountType === 'ccr') {
+        // CCR：使用 ccrRelayService
+        logger.info(`[GeminiDirect] Delegating to ccrRelayService for account ${accountId}`)
+
+        if (stream) {
+          await ccrRelayService.relayStreamRequestWithUsageCapture(
+            accountId,
+            req.body,
+            req.apiKey,
+            res,
+            req.headers,
+            (usageData) => {
+              if (usageData?.input_tokens !== undefined) {
+                this._recordClaudeUsage(apiKeyId, usageData, model, accountId, 'ccr')
+              }
+            }
+          )
+        } else {
+          const response = await ccrRelayService.relayRequest(
+            accountId,
+            req.body,
+            req.apiKey,
+            res,
+            req.headers
+          )
+          this._handleClaudeNonStreamResponse(res, response, apiKeyId, model, accountId)
+        }
+      } else {
+        throw new Error(`Unknown Claude account type: ${accountType}`)
+      }
+    } catch (error) {
+      logger.error(
+        `[GeminiDirect] Claude relay delegation failed for ${accountType}:`,
+        error.message
+      )
+
+      // 标记限流并清除会话映射
+      if (error.response?.status === 429 || error.response?.status === 503) {
+        try {
+          await unifiedMixedScheduler.markAccountRateLimited(accountId, accountType, sessionHash)
+        } catch (limitError) {
+          logger.warn('[GeminiDirect] Failed to mark Claude account as rate limited:', limitError)
+        }
+      }
+
+      // 如果响应已经发送，不再处理
+      if (res.headersSent) {
+        return
+      }
+
+      const status = error.response?.status || 500
+      const message = error.message || 'Internal Server Error'
+
+      res.status(status).json({
+        type: 'error',
+        error: {
+          type: 'api_error',
+          message
+        }
+      })
+    }
+  }
+
+  /**
+   * 处理 Claude 非流式响应
+   */
+  _handleClaudeNonStreamResponse(res, response, apiKeyId, model, accountId) {
+    try {
+      const jsonData = typeof response.body === 'string' ? JSON.parse(response.body) : response.body
+      if (jsonData.usage) {
+        this._recordClaudeUsage(
+          apiKeyId,
+          jsonData.usage,
+          jsonData.model || model,
+          accountId,
+          'claude'
+        )
+      }
+      res.status(response.statusCode || 200).json(jsonData)
+    } catch (e) {
+      res.status(response.statusCode || 200).send(response.body)
+    }
+  }
+
+  /**
+   * 记录 Claude 账户的使用量
+   */
+  async _recordClaudeUsage(keyId, usage, model, accountId, sourceType) {
+    if (!usage || (usage.input_tokens === 0 && usage.output_tokens === 0)) {
+      return
+    }
+
+    try {
+      const usageObject = {
+        input_tokens: usage.input_tokens || 0,
+        output_tokens: usage.output_tokens || 0,
+        cache_creation_input_tokens: usage.cache_creation_input_tokens || 0,
+        cache_read_input_tokens: usage.cache_read_input_tokens || 0
+      }
+
+      await apiKeyService.recordUsageWithDetails(keyId, usageObject, model, accountId, sourceType)
+
+      logger.debug(
+        `[GeminiDirect] Claude usage recorded - Source: ${sourceType}, Model: ${model}, Input: ${usageObject.input_tokens}, Output: ${usageObject.output_tokens}`
+      )
+    } catch (e) {
+      logger.error('[GeminiDirect] Failed to record Claude usage:', e)
+    }
   }
 }
 
