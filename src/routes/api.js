@@ -1194,6 +1194,26 @@ async function handleMessagesRequest(req, res) {
   }
 }
 
+// 📊 事件日志端点 - 接收客户端遥测数据 (解决 /api/api/event_logging/batch 404/401 问题)
+// 兼容多种挂载方式和路径前缀，且允许匿名访问（客户端上报日志通常不带鉴权信息）
+const handleEventLogging = (req, res) => {
+  // 仅记录日志，不进行实际处理
+  // 如果有 API Key 则记录，没有也没关系
+  const keyName = req.apiKey ? req.apiKey.name : 'anonymous'
+  logger.debug(`📊 Event logging batch received from: ${keyName}, url: ${req.originalUrl}`)
+
+  if (req.body && Array.isArray(req.body.events)) {
+    logger.debug(`📊 Received ${req.body.events.length} events`)
+  }
+  // 始终返回 200 OK
+  res.status(200).json({ status: 'ok' })
+}
+
+// 移除 authenticateApiKey 中间件，允许匿名上报
+router.post('/api/event_logging/batch', handleEventLogging)
+router.post('/event_logging/batch', handleEventLogging)
+router.post('/api/api/event_logging/batch', handleEventLogging)
+
 // 🚀 Claude API messages 端点 - /api/v1/messages
 router.post('/v1/messages', authenticateApiKey, handleMessagesRequest)
 
