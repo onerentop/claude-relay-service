@@ -1,9 +1,12 @@
 const redisClient = require('../models/redis')
 const logger = require('../utils/logger')
+const LRUCache = require('../utils/lruCache')
 
 class UserConfigService {
   constructor() {
     this.redis = redisClient.client
+    // L1 Cache: 500 items, default TTL handled by setter
+    this.cache = new LRUCache(500)
   }
 
   _getKey(userId, type) {
@@ -18,8 +21,21 @@ class UserConfigService {
   async getModelMapping(userId) {
     try {
       const key = this._getKey(userId, 'model_mapping')
+
+      // 1. Check L1 Cache
+      const cached = this.cache.get(key)
+      if (cached !== undefined) {
+        return cached
+      }
+
+      // 2. Fetch from Redis
       const mapping = await this.redis.get(key)
-      return mapping ? JSON.parse(mapping) : {}
+      const result = mapping ? JSON.parse(mapping) : {}
+
+      // 3. Update L1 Cache (60s TTL)
+      this.cache.set(key, result, 60 * 1000)
+
+      return result
     } catch (error) {
       logger.error(`Failed to get model mapping for user ${userId}:`, error)
       return {}
@@ -35,6 +51,10 @@ class UserConfigService {
     try {
       const key = this._getKey(userId, 'model_mapping')
       await this.redis.set(key, JSON.stringify(mapping))
+
+      // Update L1 Cache immediately
+      this.cache.set(key, mapping, 60 * 1000)
+
       return true
     } catch (error) {
       logger.error(`Failed to set model mapping for user ${userId}:`, error)
@@ -50,8 +70,21 @@ class UserConfigService {
   async getSystemPrompt(userId) {
     try {
       const key = this._getKey(userId, 'system_prompt')
+
+      // 1. Check L1 Cache
+      const cached = this.cache.get(key)
+      if (cached !== undefined) {
+        return cached
+      }
+
+      // 2. Fetch from Redis
       const config = await this.redis.get(key)
-      return config ? JSON.parse(config) : { prompt: '', position: 'append' }
+      const result = config ? JSON.parse(config) : { prompt: '', position: 'append' }
+
+      // 3. Update L1 Cache (60s TTL)
+      this.cache.set(key, result, 60 * 1000)
+
+      return result
     } catch (error) {
       logger.error(`Failed to get system prompt for user ${userId}:`, error)
       return { prompt: '', position: 'append' }
@@ -67,7 +100,12 @@ class UserConfigService {
   async setSystemPrompt(userId, prompt, position = 'append') {
     try {
       const key = this._getKey(userId, 'system_prompt')
-      await this.redis.set(key, JSON.stringify({ prompt, position }))
+      const config = { prompt, position }
+      await this.redis.set(key, JSON.stringify(config))
+
+      // Update L1 Cache immediately
+      this.cache.set(key, config, 60 * 1000)
+
       return true
     } catch (error) {
       logger.error(`Failed to set system prompt for user ${userId}:`, error)
@@ -83,9 +121,21 @@ class UserConfigService {
   async getGeminiDirectEnabled(userId) {
     try {
       const key = this._getKey(userId, 'gemini_direct_enabled')
+
+      // 1. Check L1 Cache
+      const cached = this.cache.get(key)
+      if (cached !== undefined) {
+        return cached
+      }
+
+      // 2. Fetch from Redis
       const enabled = await this.redis.get(key)
-      // Default to false if not set
-      return enabled === 'true'
+      const result = enabled === 'true'
+
+      // 3. Update L1 Cache (60s TTL)
+      this.cache.set(key, result, 60 * 1000)
+
+      return result
     } catch (error) {
       logger.error(`Failed to get Gemini direct status for user ${userId}:`, error)
       return false
@@ -101,6 +151,10 @@ class UserConfigService {
     try {
       const key = this._getKey(userId, 'gemini_direct_enabled')
       await this.redis.set(key, String(enabled))
+
+      // Update L1 Cache immediately
+      this.cache.set(key, enabled === true || enabled === 'true', 60 * 1000)
+
       return true
     } catch (error) {
       logger.error(`Failed to set Gemini direct status for user ${userId}:`, error)

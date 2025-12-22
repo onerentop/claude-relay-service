@@ -3,6 +3,7 @@ const { v4: uuidv4 } = require('uuid')
 const config = require('../../config/config')
 const redis = require('../models/redis')
 const logger = require('../utils/logger')
+const LRUCache = require('../utils/lruCache')
 
 const ACCOUNT_TYPE_CONFIG = {
   claude: { prefix: 'claude:account:' },
@@ -73,6 +74,8 @@ function sanitizeAccountIdForType(accountId, accountType) {
 class ApiKeyService {
   constructor() {
     this.prefix = config.security.apiKeyPrefix
+    // L1 Cache: 2000 items, short TTL (30s) for validation results
+    this.validationCache = new LRUCache(2000)
   }
 
   // 🔑 生成新的API Key
@@ -216,6 +219,12 @@ class ApiKeyService {
       // 计算API Key的哈希值
       const hashedKey = this._hashApiKey(apiKey)
 
+      // 1. Check L1 Cache
+      const cachedResult = this.validationCache.get(hashedKey)
+      if (cachedResult) {
+        return cachedResult
+      }
+
       // 通过哈希值直接查找API Key（性能优化）
       const keyData = await redis.findApiKeyByHash(hashedKey)
 
@@ -234,7 +243,9 @@ class ApiKeyService {
 
       // 处理激活逻辑（仅在 activation 模式下）
       if (keyData.expirationMode === 'activation' && keyData.isActivated !== 'true') {
-        // 首次使用，需要激活
+        // ... (激活逻辑保持不变，且激活过程不应缓存，或者缓存失效)
+        // 激活是一个写操作，所以这里我们应该让它穿透到 Redis 并更新
+        // 为了简单起见，如果需要激活，我们不依赖缓存，并在成功激活后更新缓存
         const now = new Date()
         const activationPeriod = parseInt(keyData.activationDays || 30) // 默认30
         const activationUnit = keyData.activationUnit || 'days' // 默认天
@@ -285,6 +296,9 @@ class ApiKeyService {
       }
 
       // 获取使用统计（供返回数据使用）
+      // 注意：这里我们可能需要容忍一定的延迟，或者不缓存 usage
+      // 为了性能，我们缓存整个结果，包括 usage。这会导致 30秒内的 usage 数据不更新
+      // 但对于鉴权来说是完全可以接受的
       const usage = await redis.getUsageStats(keyData.id)
 
       // 获取费用统计
@@ -323,7 +337,7 @@ class ApiKeyService {
         tags = []
       }
 
-      return {
+      const result = {
         valid: true,
         keyData: {
           id: keyData.id,
@@ -358,6 +372,12 @@ class ApiKeyService {
           usage
         }
       }
+
+      // 2. Set L1 Cache (30s TTL)
+      // Only cache successful validations to avoid caching transient errors
+      this.validationCache.set(hashedKey, result, 30 * 1000)
+
+      return result
     } catch (error) {
       logger.error('❌ API key validation error:', error)
       return { valid: false, error: 'Internal validation error' }
@@ -730,6 +750,11 @@ class ApiKeyService {
       // keyData.apiKey 存储的就是 hashedKey（见generateApiKey第123行）
       await redis.setApiKey(keyId, updatedData, keyData.apiKey)
 
+      // 主动清除缓存，确保更新立即生效
+      if (keyData.apiKey) {
+        this.validationCache.cache.delete(keyData.apiKey)
+      }
+
       logger.success(`📝 Updated API key: ${keyId}, hashMap updated`)
 
       return { success: true }
@@ -762,6 +787,8 @@ class ApiKeyService {
       // 从哈希映射中移除（这样就不能再使用这个key进行API调用）
       if (keyData.apiKey) {
         await redis.deleteApiKeyHash(keyData.apiKey)
+        // 主动清除缓存
+        this.validationCache.cache.delete(keyData.apiKey)
       }
 
       // 从费用排序索引中移除

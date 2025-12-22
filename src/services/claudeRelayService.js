@@ -18,6 +18,16 @@ const { createClaudeTestPayload } = require('../utils/testPayloadHelper')
 const userMessageQueueService = require('./userMessageQueueService')
 const { isStreamWritable } = require('../utils/streamHelper')
 
+// 🌐 Global Keep-Alive Agent for Claude API
+// Used when no proxy is configured to reuse TCP connections and improve performance
+const keepAliveAgent = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 30000,
+  timeout: 600000, // Match config.requestTimeout (10 minutes)
+  maxSockets: 500, // Allow high concurrency
+  maxFreeSockets: 50
+})
+
 class ClaudeRelayService {
   constructor() {
     this.claudeApiUrl = 'https://api.anthropic.com/v1/messages?beta=true'
@@ -955,8 +965,8 @@ class ClaudeRelayService {
       const account = accountData.find((acc) => acc.id === accountId)
 
       if (!account || !account.proxy) {
-        logger.debug('🌐 No proxy configured for Claude account')
-        return null
+        logger.debug('🌐 No proxy configured for Claude account, using Keep-Alive agent')
+        return keepAliveAgent
       }
 
       const proxyAgent = ProxyHelper.createProxyAgent(account.proxy)
@@ -967,8 +977,8 @@ class ClaudeRelayService {
       }
       return proxyAgent
     } catch (error) {
-      logger.warn('⚠️ Failed to create proxy agent:', error)
-      return null
+      logger.warn('⚠️ Failed to create proxy agent, falling back to Keep-Alive agent:', error)
+      return keepAliveAgent
     }
   }
 
