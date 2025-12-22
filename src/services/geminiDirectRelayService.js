@@ -153,7 +153,7 @@ class GeminiDirectRelayService {
         if (Array.isArray(msg.content)) {
           for (const block of msg.content) {
             if (block.signature || block.thought_signature || block.thoughtSignature) {
-              logger.info(`[GeminiDirect] Original request msg[${i}] has signature in block:`, {
+              logger.debug(`[GeminiDirect] Original request msg[${i}] has signature in block:`, {
                 role: msg.role,
                 blockType: block.type,
                 hasSignature: !!(
@@ -170,10 +170,6 @@ class GeminiDirectRelayService {
 
     // 4. 转换请求 (New Direct Pipeline)
     const geminiBody = claudeToGemini.convertRequest(req.body, systemPromptConfig, targetModel)
-
-    // DEBUG: Log the converted request
-    console.log('[GeminiDirect] Converted Gemini request body:')
-    console.log(JSON.stringify(geminiBody, null, 2).substring(0, 2000))
 
     // Retry logic variables
     let retries = 0
@@ -266,11 +262,14 @@ class GeminiDirectRelayService {
           // API Key 账户直接使用转换后的 body，但需要清洗 id
           const requestData = this._sanitizeForApiKey(geminiBody)
 
+          // 根据 gemini-cli 官方做法，添加 User-Agent 头
+          const userAgent = `GeminiCLI/1.0.0 (${process.platform}; ${process.arch})`
           const axiosConfig = {
             method: 'POST',
             url,
             headers: {
-              'Content-Type': 'application/json'
+              'Content-Type': 'application/json',
+              'User-Agent': userAgent
             },
             data: requestData,
             responseType: stream ? 'stream' : 'json',
@@ -528,7 +527,7 @@ class GeminiDirectRelayService {
     }
     const messageStartSSE = `event: message_start\ndata: ${JSON.stringify(messageStartEvent)}\n\n`
     const startWriteResult = res.write(messageStartSSE)
-    logger.info(
+    logger.debug(
       `[GeminiDirect] Sent message_start event, write=${startWriteResult}, len=${messageStartSSE.length}`
     )
 
@@ -545,10 +544,9 @@ class GeminiDirectRelayService {
 
         // Detailed chunk inspection
         const chunkStr = JSON.stringify(chunk)
-        logger.info(
+        logger.debug(
           `[GeminiDirect] Received chunk #${chunkCount}: length=${chunkStr.length}, keys=${Object.keys(chunk || {}).join(',')}`
         )
-        logger.info(`[GeminiDirect] Chunk #${chunkCount} content: ${chunkStr.substring(0, 500)}`)
 
         if (chunk.usageMetadata) {
           finalUsage.input_tokens = chunk.usageMetadata.promptTokenCount || finalUsage.input_tokens
@@ -572,20 +570,16 @@ class GeminiDirectRelayService {
             writeResult = res.write(sseData)
             // 详细日志：记录实际发送的内容
             if (event.type === 'content_block_delta' && event.delta) {
-              const deltaContent =
-                event.delta.text || event.delta.thinking || event.delta.signature || ''
-              logger.info(
-                `[GeminiDirect] Event #${eventCount} type=${event.type}, index=${event.index}, deltaType=${event.delta.type}, content="${deltaContent.substring(0, 100)}..."`
-              )
+              // Skip logging content detail to reduce noise
             } else if (
               event.type === 'content_block_start' ||
               event.type === 'content_block_stop'
             ) {
-              logger.info(
+              logger.debug(
                 `[GeminiDirect] Event #${eventCount} type=${event.type}, index=${event.index}, blockType=${event.content_block?.type || 'N/A'}`
               )
             } else {
-              logger.info(
+              logger.debug(
                 `[GeminiDirect] Event #${eventCount} type=${event.type}, write=${writeResult}, len=${sseData.length}`
               )
             }
@@ -617,7 +611,7 @@ class GeminiDirectRelayService {
       )
 
       res.end(() => {
-        logger.info(`[GeminiDirect] res.end() callback fired - response fully sent`)
+        logger.debug(`[GeminiDirect] res.end() callback fired - response fully sent`)
       })
 
       // Record Usage asynchronously
@@ -638,7 +632,7 @@ class GeminiDirectRelayService {
   async *_geminiChunkGenerator(dataStream) {
     // 使用事件监听替代 for-await 循环
     // 原因：Gemini PA API 返回 Content-Length: 0，导致 for-await 不执行
-    logger.info(
+    logger.debug(
       `[GeminiDirect] Starting chunk generator, dataStream type: ${typeof dataStream}, constructor: ${dataStream?.constructor?.name || 'unknown'}`
     )
 
@@ -707,7 +701,7 @@ class GeminiDirectRelayService {
     })
 
     dataStream.on('end', () => {
-      logger.info('[GeminiDirect] dataStream "end" event fired')
+      logger.debug('[GeminiDirect] dataStream "end" event fired')
 
       // 处理 StringDecoder 残留的多字节字符
       const remaining = decoder.end()
@@ -779,7 +773,7 @@ class GeminiDirectRelayService {
       logger.error('[GeminiDirect] Stream completed with error:', streamError)
     }
 
-    logger.info(
+    logger.debug(
       `[GeminiDirect] Chunk generator finished. Raw chunks: ${rawChunkCount}, Total bytes: ${totalRawBytes}, Yielded: ${yieldCount}`
     )
   }

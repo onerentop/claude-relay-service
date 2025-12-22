@@ -216,7 +216,7 @@ class UnifiedGeminiScheduler {
                 (model) => model.replace('models/', '') === normalizedModel
               )
               if (!modelSupported) {
-                logger.warn(
+                logger.debug(
                   `⚠️ Bound Gemini-API account ${boundAccount.name} does not support model ${requestedModel}`
                 )
                 return availableAccounts
@@ -268,7 +268,7 @@ class UnifiedGeminiScheduler {
                 (model) => model.replace('models/', '') === normalizedModel
               )
               if (!modelSupported) {
-                logger.warn(
+                logger.debug(
                   `⚠️ Bound Gemini account ${boundAccount.name} does not support model ${requestedModel}`
                 )
                 return availableAccounts

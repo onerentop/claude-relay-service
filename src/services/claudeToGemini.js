@@ -815,7 +815,7 @@ class ClaudeToGeminiConverter {
           // 参照 llms 项目：Gemini 2.x 自动签名生成
           // 当有 thinking 内容但签名未发送时，在发送文本前自动生成签名
           if (streamState.hasThinkingContent && !streamState.signatureSent) {
-            logger.info(
+            logger.debug(
               '[ClaudeToGemini] Auto-generating signature for Gemini 2.x (thinking exists but no signature)'
             )
 
