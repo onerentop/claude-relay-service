@@ -600,8 +600,8 @@ class UnifiedClaudeScheduler {
       }
     }
 
-    // 获取官方Claude账户（共享池）
-    const claudeAccounts = await redis.getAllClaudeAccounts()
+    // 获取官方Claude账户（共享池）- 使用缓存版本提升性能
+    const claudeAccounts = await claudeAccountService.getAllAccountsCached()
     for (const account of claudeAccounts) {
       if (
         account.isActive === 'true' &&

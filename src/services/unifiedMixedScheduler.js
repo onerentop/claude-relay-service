@@ -267,8 +267,8 @@ class UnifiedMixedScheduler {
     const availableAccounts = []
 
     try {
-      // 1. 获取 Claude Official 账户
-      const claudeAccounts = await redis.getAllClaudeAccounts()
+      // 1. 获取 Claude Official 账户 - 使用缓存版本提升性能
+      const claudeAccounts = await claudeAccountService.getAllAccountsCached()
       logger.info(`[MixedScheduler] Found ${claudeAccounts.length} Claude Official accounts`)
 
       for (const account of claudeAccounts) {

@@ -68,6 +68,11 @@ class ClaudeAccountService {
       },
       10 * 60 * 1000
     )
+
+    // 🚀 性能优化：账户列表缓存，减少 Redis 查询
+    this._accountsListCache = null
+    this._accountsListCacheTime = 0
+    this._accountsListCacheTTL = 30 * 1000 // 30 秒缓存 TTL
   }
 
   // 🏢 创建Claude账户
@@ -183,6 +188,9 @@ class ClaudeAccountService {
     }
 
     await redis.setClaudeAccount(accountId, accountData)
+
+    // 清除账户列表缓存
+    this.invalidateAccountsCache()
 
     logger.success(`🏢 Created Claude account: ${name} (${accountId})`)
 
@@ -601,6 +609,34 @@ class ClaudeAccountService {
     }
   }
 
+  /**
+   * 🚀 性能优化：带缓存的获取所有 Claude 账户原始数据
+   * 用于调度器等需要频繁查询但不需要额外处理的场景
+   * 缓存 TTL: 30 秒
+   * @returns {Promise<Array>} 原始账户数据数组
+   */
+  async getAllAccountsCached() {
+    const now = Date.now()
+    if (this._accountsListCache && now - this._accountsListCacheTime < this._accountsListCacheTTL) {
+      return this._accountsListCache
+    }
+
+    const accounts = await redis.getAllClaudeAccounts()
+    this._accountsListCache = accounts
+    this._accountsListCacheTime = now
+    return accounts
+  }
+
+  /**
+   * 🗑️ 清除账户列表缓存
+   * 应在账户增删改时调用，确保数据一致性
+   */
+  invalidateAccountsCache() {
+    this._accountsListCache = null
+    this._accountsListCacheTime = 0
+    logger.debug('🗑️ Claude accounts list cache invalidated')
+  }
+
   // 📋 获取单个账号的概要信息（用于前端展示会话窗口等状态）
   async getAccountOverview(accountId) {
     try {
@@ -806,6 +842,9 @@ class ClaudeAccountService {
 
       await redis.setClaudeAccount(accountId, updatedData)
 
+      // 清除账户列表缓存
+      this.invalidateAccountsCache()
+
       if (shouldClearAutoStopFields) {
         const fieldsToRemove = [
           'rateLimitAutoStopped',
@@ -839,6 +878,9 @@ class ClaudeAccountService {
       if (result === 0) {
         throw new Error('Account not found')
       }
+
+      // 清除账户列表缓存
+      this.invalidateAccountsCache()
 
       logger.success(`🗑️ Deleted Claude account: ${accountId}`)
 

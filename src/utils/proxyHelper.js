@@ -44,6 +44,15 @@ class ProxyHelper {
         agentCommonOptions.keepAlive = proxySettings.keepAlive
       }
 
+      // 🚀 Keep-Alive 探活间隔配置
+      if (
+        typeof proxySettings.keepAliveMsecs === 'number' &&
+        Number.isFinite(proxySettings.keepAliveMsecs) &&
+        proxySettings.keepAliveMsecs > 0
+      ) {
+        agentCommonOptions.keepAliveMsecs = proxySettings.keepAliveMsecs
+      }
+
       if (
         typeof proxySettings.maxSockets === 'number' &&
         Number.isFinite(proxySettings.maxSockets) &&
@@ -77,6 +86,7 @@ class ProxyHelper {
         password: proxy.password,
         family: useIPv4,
         keepAlive: agentCommonOptions.keepAlive,
+        keepAliveMsecs: agentCommonOptions.keepAliveMsecs,
         maxSockets: agentCommonOptions.maxSockets,
         maxFreeSockets: agentCommonOptions.maxFreeSockets,
         timeout: agentCommonOptions.timeout

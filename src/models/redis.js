@@ -1374,16 +1374,47 @@ class RedisClient {
     return await this.client.hgetall(key)
   }
 
-  async getAllClaudeAccounts() {
-    const keys = await this.client.keys('claude:account:*')
-    const accounts = []
-    for (const key of keys) {
-      const accountData = await this.client.hgetall(key)
-      if (accountData && Object.keys(accountData).length > 0) {
-        accounts.push({ id: key.replace('claude:account:', ''), ...accountData })
-      }
+  /**
+   * 🚀 性能优化：使用 SCAN + Pipeline 批量获取所有账户
+   * 避免 KEYS 命令阻塞和逐个 HGETALL 的网络往返开销
+   * @param {string} pattern - Redis key 匹配模式 (如 'claude:account:*')
+   * @param {string} prefix - key 前缀，用于提取 ID (如 'claude:account:')
+   * @returns {Promise<Array>} 账户数据数组
+   */
+  async _getAllAccountsWithPipeline(pattern, prefix) {
+    // 1. 使用 SCAN 代替 KEYS（非阻塞，增量扫描）
+    const keys = []
+    let cursor = '0'
+    do {
+      const [newCursor, batch] = await this.client.scan(cursor, 'MATCH', pattern, 'COUNT', 100)
+      cursor = newCursor
+      keys.push(...batch)
+    } while (cursor !== '0')
+
+    if (keys.length === 0) {
+      return []
     }
-    return accounts
+
+    // 2. 使用 Pipeline 批量 HGETALL（减少网络往返）
+    const pipeline = this.client.pipeline()
+    for (const key of keys) {
+      pipeline.hgetall(key)
+    }
+    const results = await pipeline.exec()
+
+    // 3. 解析结果，过滤空数据
+    return results
+      .map(([err, data], i) => {
+        if (err || !data || Object.keys(data).length === 0) {
+          return null
+        }
+        return { id: keys[i].replace(prefix, ''), ...data }
+      })
+      .filter(Boolean)
+  }
+
+  async getAllClaudeAccounts() {
+    return await this._getAllAccountsWithPipeline('claude:account:*', 'claude:account:')
   }
 
   async deleteClaudeAccount(accountId) {
@@ -1403,15 +1434,7 @@ class RedisClient {
   }
 
   async getAllDroidAccounts() {
-    const keys = await this.client.keys('droid:account:*')
-    const accounts = []
-    for (const key of keys) {
-      const accountData = await this.client.hgetall(key)
-      if (accountData && Object.keys(accountData).length > 0) {
-        accounts.push({ id: key.replace('droid:account:', ''), ...accountData })
-      }
-    }
-    return accounts
+    return await this._getAllAccountsWithPipeline('droid:account:*', 'droid:account:')
   }
 
   async deleteDroidAccount(accountId) {
@@ -1433,15 +1456,7 @@ class RedisClient {
   }
 
   async getAllOpenAIAccounts() {
-    const keys = await this.client.keys('openai:account:*')
-    const accounts = []
-    for (const key of keys) {
-      const accountData = await this.client.hgetall(key)
-      if (accountData && Object.keys(accountData).length > 0) {
-        accounts.push({ id: key.replace('openai:account:', ''), ...accountData })
-      }
-    }
-    return accounts
+    return await this._getAllAccountsWithPipeline('openai:account:*', 'openai:account:')
   }
 
   // 🔐 会话管理（用于管理员登录等）
