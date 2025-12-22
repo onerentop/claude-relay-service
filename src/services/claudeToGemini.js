@@ -290,9 +290,11 @@ class ClaudeToGeminiConverter {
                 args: block.input
               }
             }
-            // 🎯 关键：将 thinking 块的签名附加到 functionCall
-            if (messageThinkingSignature) {
-              part.thoughtSignature = messageThinkingSignature
+            // 🎯 关键：优先使用 thinking 块的签名，其次使用 tool_use 自带的签名
+            // tool_use 自带签名是在 convertResponse 时保存的
+            const sig = messageThinkingSignature || block.thought_signature || block.thoughtSignature
+            if (sig) {
+              part.thoughtSignature = sig
             }
             parts.push(part)
           } else if (block.type === 'tool_result') {
@@ -577,6 +579,11 @@ class ClaudeToGeminiConverter {
           id: `toolu_${uuidv4().substring(0, 8)}`,
           name: part.functionCall.name,
           input: part.functionCall.args
+        }
+        // 🎯 关键：保存 thoughtSignature，以便历史消息重新发送时能附加到 functionCall
+        // 根据 gemini-cli 官方做法，thoughtSignature 必须保留
+        if (part.thoughtSignature) {
+          toolUsePart.thought_signature = part.thoughtSignature
         }
         content.push(toolUsePart)
       }
@@ -936,15 +943,20 @@ class ClaudeToGeminiConverter {
         }
 
         const toolUseId = `toolu_${uuidv4().substring(0, 8)}`
+        const contentBlock = {
+          type: 'tool_use',
+          id: toolUseId,
+          name: part.functionCall.name,
+          input: {}
+        }
+        // 🎯 关键：保存 thoughtSignature，以便历史消息重新发送时能附加到 functionCall
+        if (part.thoughtSignature) {
+          contentBlock.thought_signature = part.thoughtSignature
+        }
         yield {
           type: 'content_block_start',
           index: streamState.index,
-          content_block: {
-            type: 'tool_use',
-            id: toolUseId,
-            name: part.functionCall.name,
-            input: {}
-          }
+          content_block: contentBlock
         }
 
         yield {
