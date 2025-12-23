@@ -273,16 +273,29 @@ class GeminiDirectRelayService {
         if (accountType === 'gemini-api') {
           // --- API Key 账户逻辑 ---
           let modelName = targetModel
-          if (
-            !modelName.startsWith('models/') &&
-            !modelName.startsWith('publishers/') &&
-            !modelName.startsWith('projects/')
-          ) {
-            modelName = `models/${modelName}`
-          }
+
+          // 🐛 修复：移除模型名中可能存在的前缀，避免重复
+          modelName = modelName.replace(/^(models|publishers|projects)\//, '')
+
+          // 检查 baseUrl 格式（参考 geminiHandlers.js）
+          // - 新格式（以 /models 结尾）: https://xxx.com/v1beta/models -> 直接拼接 /{model}:action
+          // - 旧格式（不以 /models 结尾）: https://xxx.com/v1beta -> 拼接 /models/{model}:action
+          const normalizedBaseUrl = endpointBase.replace(/\/+$/, '')
+          const isNewFormat = normalizedBaseUrl.endsWith('/models')
 
           const action = stream ? 'streamGenerateContent' : 'generateContent'
-          const url = `${endpointBase}/${modelName}:${action}?alt=sse&key=${account.apiKey}`
+          let url
+
+          if (isNewFormat) {
+            // 新格式: baseUrl 已包含 /v1beta/models，直接拼接 /{model}:action
+            url = `${normalizedBaseUrl}/${modelName}:${action}?alt=sse&key=${account.apiKey}`
+          } else {
+            // 旧格式: 需要添加 /models/
+            if (!modelName.startsWith('publishers/') && !modelName.startsWith('projects/')) {
+              modelName = `models/${modelName}`
+            }
+            url = `${normalizedBaseUrl}/${modelName}:${action}?alt=sse&key=${account.apiKey}`
+          }
 
           // API Key 账户直接使用转换后的 body，但需要清洗 id
           const requestData = this._sanitizeForApiKey(geminiBody)
