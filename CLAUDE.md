@@ -22,6 +22,7 @@ Claude Relay Service 是一个多平台 AI API 中转服务，支持 **Claude (�
   - 检查: `npm run lint`
   - 格式化: `npm run format` (使用 Prettier)
 - **测试**: `npm test` (运行 Jest 测试)
+- **单个测试**: `npx jest tests/claudeToGemini.test.js` (运行指定测试文件)
 
 ### 数据与维护
 - **初始化/重置**: `npm run setup` (生成配置和管理员凭据)
@@ -40,7 +41,7 @@ Claude Relay Service 是一个多平台 AI API 中转服务，支持 **Claude (�
 
 ### 关键架构概念
 
-- **统一调度系统**: 使用 `unifiedClaudeScheduler`、`unifiedGeminiScheduler` 等实现跨账户类型的智能调度。
+- **统一调度系统**: 使用 `unifiedClaudeScheduler`、`unifiedGeminiScheduler`、`unifiedMixedScheduler` 实现跨账户类型的智能调度，支持账户分组、权重分配和故障转移。
 - **Gemini Direct 管道**: 新一代 Gemini 转发机制，支持 Claude 格式直接转 Gemini 格式，完美支持 Claude 3.7 Thinking 模式到 Gemini Thinking 的映射，以及 Google Search 工具的转换。
 - **用户配置覆盖**: 支持用户级别的模型映射 (`model_mapping`) 和系统提示词 (`system_prompt`)，允许不同用户自定义转发行为。
 - **多账户支持**: 支持 claude-official, claude-console, bedrock, gemini, openai, azure-openai 等。
@@ -57,12 +58,22 @@ Claude Relay Service 是一个多平台 AI API 中转服务，支持 **Claude (�
 - **bedrockRelayService.js**: AWS Bedrock 转发。
 - **azureOpenaiRelayService.js**: Azure OpenAI 转发。
 - **openaiResponsesRelayService.js**: OpenAI 兼容格式转发。
+- **ccrRelayService.js**: CCR 账户转发。
+- **droidRelayService.js**: Droid (Factory.ai) 账户转发。
+
+#### 调度服务 (src/services/)
+- **unifiedClaudeScheduler.js**: Claude 账户统一调度，支持 official/console/bedrock 类型。
+- **unifiedGeminiScheduler.js**: Gemini 账户统一调度，支持 OAuth/API Key 类型。
+- **unifiedMixedScheduler.js**: 混合调度器，支持跨账户类型的请求分发。
+- **droidScheduler.js**: Droid 账户调度。
 
 #### 账户管理服务
 - **claudeAccountService.js**: Claude OAuth 账户管理与 Token 刷新。
 - **geminiAccountService.js**: Gemini OAuth 账户管理。
 - **geminiApiAccountService.js**: Gemini API Key 账户管理。
-- **userConfigService.js**: **(核心)** 管���用户级配置（模型映射、自定义 System Prompt、Gemini Direct 开关）。
+- **userConfigService.js**: **(核心)** 管理用户级配置（模型映射、自定义 System Prompt、Gemini Direct 开关）。
+- **accountGroupService.js**: 账户分组管理，支持将多个账户组合为逻辑分组。
+- **tokenRefreshService.js**: OAuth Token 自动刷新定时任务。
 
 #### 转换与工具服务
 - **claudeToGemini.js**: **(核心)** 负责 Claude 请求体到 Gemini 格式的转换，以及 Gemini 响应（含流式 chunks）到 Claude 格式的逆向转换。支持 JSON Schema 转换和 Thinking 协议适配。
@@ -86,7 +97,7 @@ Claude Relay Service 是一个多平台 AI API 中转服务，支持 **Claude (�
 - **命名**: 服务层使用 `Service` 后缀 (e.g., `userService.js`)，工具类使用 `Helper` 或功能名。
 
 ### 安全要求
-- **零信任**: 所有 API 路由必须经过 `authenticateApiKey` 或 `authenticateAdmin` 中��件。
+- **零信任**: 所有 API 路由必须经过 `authenticateApiKey` 或 `authenticateAdmin` 中间件。
 - **加密**: 任何 OAuth Token、Refresh Token 或第三方 API Key 存入 Redis 前必须加密。
 - **日志**: 禁止在日志中打印完整的 Token 或请求体敏感信息（使用 `tokenMask` 工具）。
 
