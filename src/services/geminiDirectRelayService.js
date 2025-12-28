@@ -284,17 +284,23 @@ class GeminiDirectRelayService {
           const isNewFormat = normalizedBaseUrl.endsWith('/models')
 
           const action = stream ? 'streamGenerateContent' : 'generateContent'
+          const queryParams = new URLSearchParams()
+          if (stream) {
+            queryParams.set('alt', 'sse')
+          }
+          queryParams.set('key', account.apiKey)
+          const queryString = queryParams.toString()
           let url
 
           if (isNewFormat) {
             // 新格式: baseUrl 已包含 /v1beta/models，直接拼接 /{model}:action
-            url = `${normalizedBaseUrl}/${modelName}:${action}?alt=sse&key=${account.apiKey}`
+            url = `${normalizedBaseUrl}/${modelName}:${action}?${queryString}`
           } else {
             // 旧格式: 需要添加 /models/
             if (!modelName.startsWith('publishers/') && !modelName.startsWith('projects/')) {
               modelName = `models/${modelName}`
             }
-            url = `${normalizedBaseUrl}/${modelName}:${action}?alt=sse&key=${account.apiKey}`
+            url = `${normalizedBaseUrl}/${modelName}:${action}?${queryString}`
           }
 
           // API Key 账户直接使用转换后的 body，但需要清洗 id
