@@ -16,8 +16,8 @@ jobs:
       - name: Trust Self-Signed Certificate
         run: |
           # 获取服务器证书
-          echo "Fetching certificate from 154.12.55.183:5000..."
-          echo -n | openssl s_client -showcerts -connect 154.12.55.183:5000 2>/dev/null | sed -ne '/-BEGIN CERTIFICATE-/,/-END CERTIFICATE-/p' > custom-registry.crt
+          echo "Fetching certificate from topren.top:5000..."
+          echo -n | openssl s_client -showcerts -connect topren.top:5000 2>/dev/null | sed -ne '/-BEGIN CERTIFICATE-/,/-END CERTIFICATE-/p' > custom-registry.crt
 
           # 验证证书内容是否获取成功
           if [ ! -s custom-registry.crt ]; then
@@ -44,7 +44,7 @@ jobs:
             network=host
           # BuildKit 容器内可能没有宿主机的 CA 证书，所以这里允许 insecure 以确保 push 成功
           config-inline: |
-            [registry."154.12.55.183:5000"]
+            [registry."topren.top:5000"]
               insecure = true
 
       - name: Log in to Private Registry (Manual)
@@ -52,13 +52,13 @@ jobs:
           REGISTRY_USER: ${{ secrets.PRIVATE_REGISTRY_USERNAME }}
           REGISTRY_PWD: ${{ secrets.PRIVATE_REGISTRY_PASSWORD }}
         run: |
-          echo "$REGISTRY_PWD" | docker login 154.12.55.183:5000 -u "$REGISTRY_USER" --password-stdin
+          echo "$REGISTRY_PWD" | docker login topren.top:5000 -u "$REGISTRY_USER" --password-stdin
 
       - name: Extract metadata (tags, labels)
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: 154.12.55.183:5000/claude-relay-service
+          images: topren.top:5000/claude-relay-service
           # 生成两种 tag:
           # 1. 分支名 (例如: dev, fix-bug) - 总是指向该分支最新代码
           # 2. commit hash (例如: sha-7b3f1a2) -用于回溯历史版本
@@ -114,13 +114,13 @@ jobs:
             # 1. 登录私有仓库 (确保服务器也能访问)
             # 注意：如果服务器未配置证书信任，这里可能需要 --tls-verify=false 或者复用 CI 的证书逻辑
             # 为简单起见，这里假设服务器已经配置了 daemon.json 的 insecure-registries 或者信任了证书
-            echo "$PRIVATE_REGISTRY_PASSWORD" | docker login 154.12.55.183:5000 -u "$PRIVATE_REGISTRY_USERNAME" --password-stdin
+            echo "$PRIVATE_REGISTRY_PASSWORD" | docker login topren.top:5000 -u "$PRIVATE_REGISTRY_USERNAME" --password-stdin
 
             # 2. 进入目录
             cd /root/docker
 
             # 3. 设���镜像名环境变量
-            export DOCKER_IMAGE_NAME="154.12.55.183:5000/claude-relay-service:${IMAGE_TAG}"
+            export DOCKER_IMAGE_NAME="topren.top:5000/claude-relay-service:${IMAGE_TAG}"
             echo "Deploying image: $DOCKER_IMAGE_NAME"
 
             # 4. 拉取并重启
