@@ -12,53 +12,24 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 方案更新：显式信任自签名证书，解决 Docker 协议协商问题
-      - name: Trust Self-Signed Certificate
-        run: |
-          # 获取服务器证书
-          echo "Fetching certificate from topren.top:5000..."
-          echo -n | openssl s_client -showcerts -connect topren.top:5000 2>/dev/null | sed -ne '/-BEGIN CERTIFICATE-/,/-END CERTIFICATE-/p' > custom-registry.crt
-
-          # 验证证书内容是否获取成功
-          if [ ! -s custom-registry.crt ]; then
-            echo "Failed to fetch certificate!"
-            exit 1
-          fi
-
-          # 安装证书到系统信任库
-          sudo cp custom-registry.crt /usr/local/share/ca-certificates/custom-registry.crt
-          sudo update-ca-certificates
-
-          # 关键修改：不再配置 insecure-registries
-          # 因为证书已被信任，Docker 应将其视为正常的 HTTPS 仓库
-          # 之前配置 insecure-registries 反而导致 Docker 优先尝试 HTTP (400)
-
-          # 重启 Docker 确保加载新的 CA 证书
-          sudo systemctl restart docker
-          while ! docker info > /dev/null 2>&1; do echo "Waiting for Docker to start..."; sleep 1; done
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
         with:
           driver-opts: |
             network=host
-          # BuildKit 容器内可能没有宿主机的 CA 证书，所以这里允许 insecure 以确保 push 成功
-          config-inline: |
-            [registry."topren.top:5000"]
-              insecure = true
 
       - name: Log in to Private Registry (Manual)
         env:
           REGISTRY_USER: ${{ secrets.PRIVATE_REGISTRY_USERNAME }}
           REGISTRY_PWD: ${{ secrets.PRIVATE_REGISTRY_PASSWORD }}
         run: |
-          echo "$REGISTRY_PWD" | docker login topren.top:5000 -u "$REGISTRY_USER" --password-stdin
+          echo "$REGISTRY_PWD" | docker login docker.topren.top -u "$REGISTRY_USER" --password-stdin
 
       - name: Extract metadata (tags, labels)
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: topren.top:5000/claude-relay-service
+          images: docker.topren.top/claude-relay-service
           # 生成两种 tag:
           # 1. 分支名 (例如: dev, fix-bug) - 总是指向该分支最新代码
           # 2. commit hash (例如: sha-7b3f1a2) -用于回溯历史版本
@@ -89,7 +60,7 @@ jobs:
         run: |
           # 获取原始分支名
           RAW_BRANCH="${{ github.ref_name }}"
-          # 将 / 替��为 -
+          # 将 / 替换为 -
           SANITIZED_BRANCH="${RAW_BRANCH//\//-}"
           echo "Original: $RAW_BRANCH"
           echo "Sanitized: $SANITIZED_BRANCH"
@@ -112,15 +83,13 @@ jobs:
           envs: PRIVATE_REGISTRY_USERNAME,PRIVATE_REGISTRY_PASSWORD,IMAGE_TAG
           script: |
             # 1. 登录私有仓库 (确保服务器也能访问)
-            # 注意：如果服务器未配置证书信任，这里可能需要 --tls-verify=false 或者复用 CI 的证书逻辑
-            # 为简单起见，这里假设服务器已经配置了 daemon.json 的 insecure-registries 或者信任了证书
-            echo "$PRIVATE_REGISTRY_PASSWORD" | docker login topren.top:5000 -u "$PRIVATE_REGISTRY_USERNAME" --password-stdin
+            echo "$PRIVATE_REGISTRY_PASSWORD" | docker login docker.topren.top -u "$PRIVATE_REGISTRY_USERNAME" --password-stdin
 
             # 2. 进入目录
             cd /root/docker
 
-            # 3. 设���镜像名环境变量
-            export DOCKER_IMAGE_NAME="topren.top:5000/claude-relay-service:${IMAGE_TAG}"
+            # 3. 设置镜像名环境变量
+            export DOCKER_IMAGE_NAME="docker.topren.top/claude-relay-service:${IMAGE_TAG}"
             echo "Deploying image: $DOCKER_IMAGE_NAME"
 
             # 4. 拉取并重启
